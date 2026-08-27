@@ -1,0 +1,372 @@
+# Static manifest (source A).
+#
+# What lives here cannot be learned programmatically: free-tier presence,
+# data policy, license. Revised by hand — about once a month.
+#
+# limits — starting values from documentation. Real limits
+# are refined by scripts/probe.py from x-ratelimit-* headers..
+#
+# IMPORTANT: trains_on_data is the price of a free tier. The default
+# is true, because an error this way is safe. Set false only
+# if you checked the specific provider's terms.
+#
+# IMPORTANT: free is a paidness declaration. The field is required at the
+# provider (or model) level. Not declared — the model is treated as PAID and
+# under free_only=true is not used at all: a silent "probably free"
+# is paid for with money. The declaration is verified by a mechanism
+# (waypost/pricing.py): prices from GET /models and the actual bill in the
+# response outweigh the manifest and can demote a model to paid on the fly.
+#
+# Free models marked in OpenRouter with the ':free' suffix are discovered
+# by the server itself at startup (waypost/discovery.py) — the manifest
+# here only sets the starting set and the data policy.
+#
+# Provider-level fields:
+#   api_key_env    primary key; extras — suffixes _2 … _5
+#                  in the environment or the api_key_envs list here
+#   prompt_cache   auto (prefix cache turns on by itself) | explicit
+#                  (needs a cache_control marker) | none
+#   concurrency    parallel-request cap (for a local model —
+#                  not tuning, but Mac Studio memory protection)
+
+providers:
+  # ------------------------------------------------------------- MLX LM (Primary Local)
+  - name: mlx
+    base_url: http://127.0.0.1:8081/v1    # mlx_lm.server
+    is_local: true
+    trains_on_data: false
+    free: true
+    concurrency: 1
+    prompt_cache: auto
+    models:
+      - id: mlx-community/Qwen3.6-27B-4bit
+        tier: L
+        ctx_window: 32768
+        max_output: 8192
+        caps: [tools, json, stream]
+        quality_score: 0.82
+        ttft_p50_ms: 450
+        weight: 1.0
+
+  # ------------------------------------------------------------ OpenRouter
+  # Freeness is visible in the API (pricing.prompt == "0" / :free suffix) —
+  # discovery.py adds new :free models automatically.
+  - name: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    trains_on_data: true
+    free: true
+    limits: { rpm: 20, rpd: 50 }
+    models:
+      - id: google/gemma-4-26b-a4b-it:free
+        tier: M
+        ctx_window: 262144
+        caps: [tools, json, vision, stream]
+        quality_score: 0.80
+        ttft_p50_ms: 2200
+      - id: google/gemma-4-31b-it:free
+        tier: M
+        ctx_window: 262144
+        caps: [tools, json, vision, stream]
+        quality_score: 0.82
+        ttft_p50_ms: 2400
+      - id: minimax/minimax-m3:free
+        tier: L
+        ctx_window: 1048576
+        caps: [tools, json, vision, stream]
+        quality_score: 0.84
+        ttft_p50_ms: 2600
+      - id: nvidia/nemotron-3-super-120b-a12b:free
+        tier: L
+        ctx_window: 262144
+        caps: [tools, json, stream]
+        quality_score: 0.83
+        ttft_p50_ms: 2500
+      - id: z-ai/glm-5.2:free
+        tier: L
+        ctx_window: 256000
+        caps: [tools, json, stream]
+        quality_score: 0.85
+        ttft_p50_ms: 2300
+      - id: liquid/lfm-2.5-2.6b:free
+        tier: S
+        ctx_window: 65536
+        caps: [tools, json, stream]
+        quality_score: 0.50
+        ttft_p50_ms: 1200
+      - id: thinkingmachines/inkling:free
+        tier: L
+        ctx_window: 1048576
+        caps: [tools, vision, stream]
+        quality_score: 0.82
+        ttft_p50_ms: 2800
+
+  # ----------------------------------------------------------------- Groq
+  # LPU chips: the lowest TTFT. 30 RPM / 14.4k RPD.
+  - name: groq
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    trains_on_data: true
+    free: true
+    limits: { rpm: 30, rpd: 1000, tpm: 6000 }
+    models:
+      - id: moonshotai/kimi-k2-instruct
+        tier: L
+        ctx_window: 131072
+        caps: [tools, json, stream]
+        quality_score: 0.80
+        quality: { code: 0.88, reasoning: 0.85, chat: 0.78, extraction: 0.75 }
+        ttft_p50_ms: 300
+      - id: groq/compound
+        tier: M
+        ctx_window: 131072
+        caps: [tools, json, stream]
+        quality_score: 0.76
+        quality: { chat: 0.80, extraction: 0.78, code: 0.70, reasoning: 0.72 }
+        ttft_p50_ms: 250
+      - id: groq/compound-mini
+        tier: S
+        ctx_window: 131072
+        caps: [tools, json, stream]
+        quality_score: 0.55
+        quality: { chat: 0.62, extraction: 0.60, code: 0.40, reasoning: 0.42 }
+        ttft_p50_ms: 180
+      - id: allam-2-7b
+        tier: S
+        ctx_window: 8192
+        caps: [json, stream]
+        quality_score: 0.45
+        ttft_p50_ms: 150
+
+  # ------------------------------------------------------------ NVIDIA NIM
+  # 100+ open-weights, ~40 RPM total per key, no daily cap.
+  - name: nvidia
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_API_KEY
+    trains_on_data: true
+    free: true
+    limits: { rpm: 40 }
+    models:
+      - id: nvidia/nemotron-3-ultra-550b-a55b
+        tier: L
+        ctx_window: 1000000
+        caps: [tools, stream]
+        quality_score: 0.86
+        ttft_p50_ms: 1400
+      - id: nvidia/nemotron-3-super-120b-a12b
+        tier: L
+        ctx_window: 262144
+        caps: [tools, json, stream]
+        quality_score: 0.84
+        ttft_p50_ms: 1500
+      - id: nvidia/nemotron-3-nano-30b-a3b
+        tier: M
+        ctx_window: 131072
+        caps: [tools, json, stream]
+        quality_score: 0.70
+        ttft_p50_ms: 400
+
+  # -------------------------------------------------------------- Cerebras
+  # WSE chips, 1M tokens/day, 8K context on free.
+  - name: cerebras
+    base_url: https://api.cerebras.ai/v1
+    api_key_env: CEREBRAS_API_KEY
+    trains_on_data: true
+    free: true
+    limits: { rpm: 15, rpd: 1000, tpm: 30000 }
+    models:
+      - id: gpt-oss-120b
+        tier: L
+        ctx_window: 131072
+        caps: [tools, json, stream]
+        quality_score: 0.82
+        quality: { code: 0.88, reasoning: 0.84, chat: 0.80, extraction: 0.78 }
+        ttft_p50_ms: 400
+      - id: llama3.1-70b
+        tier: L
+        ctx_window: 131072
+        caps: [tools, json, stream]
+        quality_score: 0.78
+        quality: { chat: 0.80, extraction: 0.78, code: 0.72, reasoning: 0.74 }
+        ttft_p50_ms: 350
+      - id: gemma-4-31b
+        tier: M
+        ctx_window: 131072
+        caps: [tools, json, vision, stream]
+        quality_score: 0.80
+        quality: { chat: 0.82, extraction: 0.80, code: 0.74, reasoning: 0.76 }
+        ttft_p50_ms: 300
+
+  # -------------------------------------------------------------- Mistral
+  # Experiment plan: ~1B tokens/month, ~1 RPS. Data may go to training.
+  - name: mistral
+    base_url: https://api.mistral.ai/v1
+    api_key_env: MISTRAL_API_KEY
+    trains_on_data: true
+    free: true
+    limits: { rpm: 60, tpm: 500000 }
+    models:
+      - id: mistral-large-latest
+        tier: L
+        ctx_window: 256000
+        caps: [tools, json, stream]
+        quality_score: 0.84
+        ttft_p50_ms: 1200
+      - id: mistral-small-latest
+        tier: M
+        ctx_window: 256000
+        caps: [tools, json, stream]
+        quality_score: 0.76
+        ttft_p50_ms: 800
+      - id: codestral-latest
+        tier: M
+        ctx_window: 256000
+        caps: [tools, json, stream]
+        quality_score: 0.80
+        ttft_p50_ms: 900
+      - id: ministral-8b-latest
+        tier: S
+        ctx_window: 256000
+        caps: [tools, json, stream]
+        quality_score: 0.55
+        ttft_p50_ms: 500
+
+  # -------------------------------------------------------------- Gemini
+  # Google AI Studio. 10 RPM / 250 RPD. Free prompts may go to improvement.
+  - name: gemini
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    api_key_env: GEMINI_API_KEY
+    trains_on_data: true
+    free: true
+    limits: { rpm: 10, rpd: 250 }
+    models:
+      - id: gemini-3.7-flash
+        tier: M
+        ctx_window: 1048576     # long context — a rare opportunity
+        caps: [tools, json, vision, stream]
+        quality_score: 0.84
+        ttft_p50_ms: 900
+      - id: gemini-3.5-flash
+        tier: M
+        ctx_window: 1048576
+        caps: [tools, json, vision, stream]
+        quality_score: 0.78
+        ttft_p50_ms: 850
+      - id: gemini-flash-latest
+        tier: M
+        ctx_window: 1048576
+        caps: [tools, json, vision, stream]
+        quality_score: 0.82
+        ttft_p50_ms: 800
+
+
+  # ---------------------------------------------------------- SiliconFlow
+  # Chinese host, free DeepSeek/Qwen. 30 RPM / 60K TPM.
+  - name: siliconflow
+    base_url: https://api.siliconflow.cn/v1
+    api_key_env: SILICONFLOW_API_KEY
+    trains_on_data: true
+    free: true
+    limits: { rpm: 30, tpm: 60000 }
+    models:
+      - id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+        tier: S
+        ctx_window: 131072
+        caps: [tools, json, stream]
+        quality_score: 0.55
+        quality: { reasoning: 0.70, code: 0.62, chat: 0.50, extraction: 0.55 }
+        ttft_p50_ms: 800
+
+  # --------------------------------------------------------------- Zhipu
+  # GLM-4.7-Flash: 200K context for free, 1 concurrent request.
+  - name: zhipu
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    api_key_env: ZHIPU_API_KEY
+    trains_on_data: true
+    free: true
+    limits: { rpm: 10, rpd: 200 }
+    models:
+      - id: glm-4.7-flash
+        tier: M
+        ctx_window: 200000
+        caps: [tools, json, stream]
+        quality_score: 0.76
+        quality: { chat: 0.80, extraction: 0.78, code: 0.70, reasoning: 0.74 }
+        ttft_p50_ms: 1200
+      - id: glm-4.5-flash
+        tier: M
+        ctx_window: 128000
+        caps: [tools, json, stream]
+        quality_score: 0.72
+        quality: { chat: 0.75, extraction: 0.74, code: 0.66, reasoning: 0.70 }
+        ttft_p50_ms: 1100
+
+  # -------------------------------------------------------------- Ollama
+  # Cloud Ollama hosting (ollama.com). An OpenAI-compatible endpoint
+  # /v1. Paid: free=false, so the free_only filter does not spend money.
+  - name: ollama
+    base_url: https://ollama.com/v1
+    api_key_env: OLLAMA_API_KEY
+    trains_on_data: false
+    free: false
+    models:
+      - id: gpt-oss:120b
+        tier: L
+        ctx_window: 131072
+        caps: [tools, json, stream]
+        quality_score: 0.82
+        ttft_p50_ms: 1900
+      - id: qwen3.5:397b
+        tier: L
+        ctx_window: 131072
+        caps: [tools, json, stream]
+        quality_score: 0.85
+        ttft_p50_ms: 2000
+      - id: gemma4:31b
+        tier: M
+        ctx_window: 262144
+        caps: [tools, json, vision, stream]
+        quality_score: 0.80
+        ttft_p50_ms: 1500
+      - id: glm-5.2
+        tier: L
+        ctx_window: 256000
+        caps: [tools, json, stream]
+        quality_score: 0.85
+        ttft_p50_ms: 2300
+      - id: minimax-m3
+        tier: L
+        ctx_window: 1048576
+        caps: [tools, json, vision, stream]
+        quality_score: 0.84
+        ttft_p50_ms: 2600
+      - id: kimi-k3
+        tier: L
+        ctx_window: 131072
+        caps: [tools, json, stream]
+        quality_score: 0.84
+        ttft_p50_ms: 2000
+      - id: deepseek-v4-flash:0731
+        tier: L
+        ctx_window: 131072
+        caps: [tools, json, stream]
+        quality_score: 0.82
+        ttft_p50_ms: 1800
+      - id: mistral-large-3:675b
+        tier: L
+        ctx_window: 256000
+        caps: [tools, json, stream]
+        quality_score: 0.84
+        ttft_p50_ms: 2000
+      - id: gpt-oss:20b
+        tier: M
+        ctx_window: 131072
+        caps: [tools, json, stream]
+        quality_score: 0.70
+        ttft_p50_ms: 1200
+      - id: nemotron-3-nano:30b
+        tier: M
+        ctx_window: 131072
+        caps: [tools, json, stream]
+        quality_score: 0.70
+        ttft_p50_ms: 1200

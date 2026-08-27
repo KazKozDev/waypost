@@ -1,0 +1,865 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Waypost — architecture requirements</title>
+<style>
+
+  @page {
+    size: A4; margin: 20mm 18mm 20mm 18mm;
+    @bottom-left {
+      content: "Waypost · Architecture requirements · v0.2";
+      font-family: "Liberation Sans", sans-serif; font-size: 7.5pt;
+      color: #94a0ab; padding-top: 4mm;
+    }
+    @bottom-right {
+      content: counter(page) " / " counter(pages);
+      font-family: "Liberation Sans", sans-serif; font-size: 7.5pt;
+      color: #94a0ab; padding-top: 4mm;
+    }
+  }
+  @page :first { @bottom-left { content: ""; } @bottom-right { content: ""; } }
+
+
+  html { font-size: 10pt; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, -system-ui, sans-serif;
+    color: #111827; line-height: 1.55; margin: 0;
+  }
+  h1, h2, h3, .display { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, -system-ui, sans-serif; font-weight: 600; letter-spacing: -0.02em; }
+
+  /* ---------- cover ---------- */
+  .cover { page-break-after: always; padding-top: 38mm; }
+  .cover .eyebrow {
+    font-size: 8.5pt; letter-spacing: .2em; text-transform: uppercase;
+    color: #6b7280; margin-bottom: 6mm; font-weight: 600;
+  }
+  .cover h1 { font-size: 28pt; line-height: 1.15; margin: 0 0 4mm; color: #111827; }
+  .cover .sub { font-size: 11.5pt; color: #4b5563; margin: 0 0 12mm; max-width: 130mm; line-height: 1.5; }
+  .rule { height: 2px; background: #111827; width: 24mm; margin: 0 0 8mm; }
+
+  .meta { border-top: 1px solid #e5e7eb; margin-top: 20mm; padding-top: 4mm; }
+  .meta table { width: 100%; border-collapse: collapse; font-size: 9pt; }
+  .meta td { padding: 1.6mm 0; vertical-align: top; }
+  .meta td:first-child { width: 38mm; color: #6b7280; font-weight: 500; }
+
+  /* ---------- headings ---------- */
+  h2 {
+    break-after: avoid;
+    font-size: 14pt; color: #111827; margin: 9mm 0 3mm;
+    padding-bottom: 1.5mm; border-bottom: 1px solid #e5e7eb;
+    page-break-after: avoid;
+  }
+  h2 .num { color: #6b7280; margin-right: 3mm; font-size: 12pt; font-weight: 500; }
+  h3 {
+    font-size: 11pt; color: #1f2937; margin: 6mm 0 2mm;
+    page-break-after: avoid;
+  }
+  p { margin: 0 0 3mm; color: #374151; }
+  ul, ol { margin: 0 0 3mm; padding-left: 5mm; color: #374151; }
+  li { margin-bottom: 1.2mm; }
+  code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace; font-size: 8.5pt; }
+  code { background: #f3f4f6; padding: 0.5mm 1.5mm; border-radius: 3px; border: 1px solid #e5e7eb; }
+
+  /* ---------- tables ---------- */
+  table.t {
+    width: 100%; border-collapse: collapse; font-size: 8.8pt;
+    margin: 0 0 4mm; page-break-inside: auto;
+  }
+  table.t th {
+    text-align: left; background: #f3f4f6; color: #4b5563;
+    font-weight: 600; padding: 2mm 2.5mm;
+    border-bottom: 1.5px solid #e5e7eb; font-size: 8.2pt;
+    letter-spacing: .04em; text-transform: uppercase;
+  }
+  table.t td {
+    padding: 2mm 2.5mm; border-bottom: 1px solid #f3f4f6; vertical-align: top; color: #374151;
+  }
+  table.t tr { page-break-inside: avoid; break-inside: avoid; }
+  table.t thead { display: table-header-group; }
+  .id { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 8pt;
+        color: #111827; font-weight: 600; white-space: nowrap; }
+  .pri { font-size: 7.5pt; font-weight: bold; letter-spacing: .05em;
+         white-space: nowrap; }
+  .must { color: #991b1b; }
+  .should { color: #92400e; }
+  .could { color: #4b5563; }
+
+  /* ---------- callouts ---------- */
+  .note {
+    border-left: 3px solid #111827; background: #f9fafb;
+    padding: 3mm 4mm; margin: 0 0 4mm; font-size: 9pt;
+    page-break-inside: avoid; border-radius: 0 4px 4px 0;
+  }
+  .note .label {
+    font-size: 7.5pt; letter-spacing: .14em; text-transform: uppercase;
+    color: #6b7280; font-weight: 600; display: block; margin-bottom: 1.5mm;
+  }
+
+  .adr {
+    border: 1px solid #e5e7eb; padding: 4mm; margin: 0 0 4mm;
+    page-break-inside: avoid; background: #ffffff; border-radius: 6px;
+  }
+  .adr h3 { margin: 0 0 2mm; font-size: 10.5pt; }
+  .adr dl { margin: 0; font-size: 9pt; }
+  .adr dt {
+    float: left; width: 26mm; color: #6b7280; font-size: 8pt;
+    text-transform: uppercase; letter-spacing: .06em; padding-top: .4mm;
+  }
+  .adr dd { margin: 0 0 2mm 28mm; }
+
+  .ascii {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 8pt;
+    line-height: 1.35; background: #f9fafb; border: 1px solid #e5e7eb;
+    padding: 4mm; white-space: pre; margin: 0 0 4mm; border-radius: 4px;
+    page-break-inside: avoid; color: #111827;
+  }
+  .section { page-break-inside: auto; }
+  .keep { page-break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<!-- ==================== COVER ==================== -->
+<div class="cover">
+  <div class="eyebrow">Architecture specification</div>
+  <div class="rule"></div>
+  <h1>Waypost</h1>
+  <p class="sub">A local LLM-provider routing gateway that prioritizes free
+     tiers and guarantees a local fallback</p>
+
+  <div class="meta">
+    <table>
+      <tr><td>Document</td><td>Architecture requirements (SAD / SRS)</td></tr>
+      <tr><td>Version</td><td>0.2 — accompanies the implementation</td></tr>
+      <tr><td>Date</td><td>August 26, 2026</td></tr>
+      <tr><td>Status</td><td>Core implemented; the L1 classifier and the semantic cache (L2) are skeletons ready, trained on own telemetry. Hedging, idempotency, the Batch API, and the PII and guard layers are beyond the original scope</td></tr>
+      <tr><td>Target environment</td><td>A single Apple Silicon machine, one user</td></tr>
+      <tr><td>Key constraint</td>
+          <td>Free-tier quotas, not a monetary budget</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ==================== 1 ==================== -->
+<div class="section">
+<h2><span class="num">1</span>Purpose and scope</h2>
+
+<p>Waypost is the single entry point for all LLM calls on the local
+machine. The client talks to an OpenAI-compatible endpoint and does not
+know which provider served the request; the system itself chooses the
+executor based on the request requirements, the remaining quotas, and
+the state of the providers.</p>
+
+<p><strong>The system's job is not "to pick the best model" but not to
+hit the quota.</strong> Free tiers are limited not by money but by the
+request rate and the token volume. It follows that the central object of
+the architecture is real-time accounting of remainders, not a model
+catalog. All other requirements are subordinate to this.</p>
+
+<h3>In scope</h3>
+<ul>
+  <li>Routing of chat/completions calls between several providers and a
+      local model</li>
+  <li>Quota accounting (requests per minute and per day, tokens per
+      minute) that survives a process restart</li>
+  <li>Classification of the request by complexity and required
+      capabilities</li>
+  <li>Response caching and support for provider prefix caching</li>
+  <li>Resilience: retries, a circuit breaker, a degradation ladder</li>
+  <li>Discovery and probing of available models</li>
+  <li>Telemetry as a training set for subsequent ML layers</li>
+</ul>
+
+<h3>Out of scope</h3>
+<ul>
+  <li>Multi-tenancy, billing, user authorization — the system is built
+      for a single owner</li>
+  <li>Horizontal scaling and distributed state</li>
+  <li>Model hosting and inference: the local runtime plugs in as a
+      regular provider</li>
+  <li>Agent orchestration, a RAG pipeline, prompt management</li>
+</ul>
+
+<div class="note">
+  <span class="label">Responsibility boundary</span>
+  Waypost decides <em>where</em> to send a request and does not interfere
+  with its content. The only exception is the privacy filter, which
+  forbids sending to the cloud but does not change the text.
+</div>
+</div>
+
+<!-- ==================== 2 ==================== -->
+<div class="section">
+<h2><span class="num">2</span>Context and actors</h2>
+
+<div class="ascii">                    ┌── control loop (background jobs) ──┐
+                    │   discovery → probing → health      │
+                    │              ↓ write to registry    │
+                    └────────────────┬───────────────────┘
+                                     │ in-memory snapshot
+  client → [ingress] → [cache] → [classifier] → [router] → [executor] → provider
+                                                              │
+                                                              └→ local model</div>
+
+<table class="t">
+  <thead><tr><th style="width:34mm">Actor</th><th>Role and expectations</th></tr></thead>
+  <tr><td><strong>Client applications</strong></td>
+      <td>Code editors, scripts, agents. Expect full OpenAI
+          compatibility: a <code>base_url</code> change without code edits.</td></tr>
+  <tr><td><strong>Cloud providers</strong></td>
+      <td>Free tiers. Unreliable by definition: limits change without
+          notice, availability is not guaranteed.</td></tr>
+  <tr><td><strong>Local runtime</strong></td>
+      <td>A model on the owner's machine. No quotas, no network, private.
+          The end point of the degradation ladder.</td></tr>
+  <tr><td><strong>Owner</strong></td>
+      <td>Also the operator. Edits the manifest, reads the stats, runs
+          probing. Has no on-call rotation — the system must recover on
+          its own.</td></tr>
+</table>
+</div>
+
+<!-- ==================== 3 ==================== -->
+<div class="section">
+<h2><span class="num">3</span>Architectural drivers</h2>
+
+<p>Four constraints everything else is derived from. Requirements that
+follow from none of them should be considered redundant.</p>
+
+<table class="t">
+  <thead><tr><th style="width:8mm">№</th><th style="width:42mm">Driver</th>
+      <th>Architectural consequence</th></tr></thead>
+  <tr><td class="id">D1</td><td><strong>Quota scarcity</strong></td>
+      <td>Accounting for remainders is a mandatory participant in every
+          routing decision, not an optional optimization. Quota state
+          survives a restart: daily limits would otherwise be lost.</td></tr>
+  <tr><td class="id">D2</td><td><strong>Data as payment</strong></td>
+      <td>A free tier is usually paid for with request content. The data
+          policy is a filter, not a weight in scoring: a rule cannot be
+          outweighed by quality or speed.</td></tr>
+  <tr><td class="id">D3</td><td><strong>Cache vs routing conflict</strong></td>
+      <td>A provider's prefix cache only works when the same provider is
+          hit with the same prefix. Smart routing inside a dialogue is
+          guaranteed to zero it — hence the sticky session binding.</td></tr>
+  <tr><td class="id">D4</td><td><strong>One machine, one process</strong></td>
+      <td>No distributed state. SQLite and in-memory structures instead
+          of external stores; the absence of cross-node coordination
+          simplifies both accounting and the cache.</td></tr>
+</table>
+</div>
+
+<!-- ==================== 4 ==================== -->
+<div class="section">
+<h2><span class="num">4</span>Functional requirements</h2>
+
+<p>Priorities: <span class="pri must">MUST</span> — without this the
+system does not fulfill its purpose;
+<span class="pri should">SHOULD</span> — substantially affects usefulness;
+<span class="pri could">COULD</span> — an improvement on top of what
+works.</p>
+
+<h3>4.1 Facade and compatibility</h3>
+<table class="t">
+  <thead><tr><th style="width:18mm">ID</th><th>Requirement</th>
+      <th style="width:18mm">Priority</th></tr></thead>
+  <tr><td class="id">FR-01</td>
+      <td>The system provides <code>/v1/chat/completions</code>,
+          <code>/v1/models</code> endpoints compatible with OpenAI in
+          request and response format.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-02</td>
+      <td>The value <code>model: "auto"</code> hands the choice to the
+          router. An explicitly named model bypasses scoring but keeps
+          the degradation ladder.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-03</td>
+      <td>Streaming is proxied without buffering the whole response.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-04</td>
+      <td>The response contains a diagnostic block: the selected
+          provider, the tier, the fallback path, the attempt count, the
+          cache status.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-05</td>
+      <td>Request extensions (<code>privacy</code>,
+          <code>latency_class</code>, <code>session_id</code>,
+          <code>no_cache</code>) are not forwarded to providers.</td>
+      <td class="pri must">MUST</td></tr>
+</table>
+
+<h3>4.2 Registry and discovery</h3>
+<table class="t">
+  <thead><tr><th style="width:18mm">ID</th><th>Requirement</th>
+      <th style="width:18mm">Priority</th></tr></thead>
+  <tr><td class="id">FR-10</td>
+      <td>Providers and models are described by a declarative manifest;
+          adding a provider requires no code change.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-11</td>
+      <td>An offering without a declared key is excluded from the
+          registry, not used with an auth error.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-12</td>
+      <td>Probing measures the actual latency, the limits from the
+          response headers, and the working (not declared) support for
+          tool calling and JSON mode.</td>
+      <td class="pri should">SHOULD</td></tr>
+  <tr><td class="id">FR-13</td>
+      <td>Discovery reconciles the provider catalog with the manifest and
+          reports discrepancies. Automatic addition is forbidden: the
+          catalog does not carry the license or the data policy.</td>
+      <td class="pri should">SHOULD</td></tr>
+  <tr><td class="id">FR-14</td>
+      <td>Probing results override the manifest values without a
+          restart.</td>
+      <td class="pri could">COULD</td></tr>
+</table>
+
+<h3>4.3 Quota accounting</h3>
+<table class="t">
+  <thead><tr><th style="width:18mm">ID</th><th>Requirement</th>
+      <th style="width:18mm">Priority</th></tr></thead>
+  <tr><td class="id">FR-20</td>
+      <td>Each offering keeps independent buckets: requests per minute,
+          requests per day, tokens per minute.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-21</td>
+      <td>A "reserve before the call → reconcile after the answer"
+          scheme: the preliminary token estimate is corrected by the
+          actual spend.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-22</td>
+      <td>A provider response about limit exhaustion blocks the
+          offering for the time it specifies, even if the own counters
+          show a remainder. The provider is trusted more than ourselves.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-23</td>
+      <td>Bucket state is restored after a process restart.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-24</td>
+      <td>Local offerings have no buckets and do not participate in
+          accounting.</td>
+      <td class="pri must">MUST</td></tr>
+</table>
+
+<h3>4.4 Classification and selection</h3>
+<table class="t">
+  <thead><tr><th style="width:18mm">ID</th><th>Requirement</th>
+      <th style="width:18mm">Priority</th></tr></thead>
+  <tr><td class="id">FR-30</td>
+      <td>The classifier determines the complexity tier, the task class,
+          and the set of required capabilities; the result is a
+          distribution with a confidence estimate, not a hard label.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-31</td>
+      <td>Low confidence raises the tier. Underestimating complexity
+          costs an escalation and double quota spend, overestimating
+          costs only overspend; the asymmetry is baked into the
+          thresholds.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-32</td>
+      <td>Candidate selection consists of a hard filter and a subsequent
+          scoring. Mixing the stages is forbidden: a capability weighed
+          as a score allows picking a model that breaks the request.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-33</td>
+      <td>The filter cuts by: context window, required capabilities,
+          quota remainder, breaker state, data policy.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-34</td>
+      <td>Scoring weights depend on the latency class: for background
+          tasks speed barely matters, but saving the quota needed by
+          interactive requests does.</td>
+      <td class="pri should">SHOULD</td></tr>
+  <tr><td class="id">FR-35</td>
+      <td>The router returns an ordered plan of several candidates, not
+          a single model.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-36</td>
+      <td>The plan always includes a local offering, even if it lost the
+          scoring.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-37</td>
+      <td>Within a session, the binding to the chosen provider is kept
+          while it is healthy and within quota.</td>
+      <td class="pri should">SHOULD</td></tr>
+  <tr><td class="id">FR-38</td>
+      <td>The quality estimate of a model is refined from the accumulated
+          telemetry, not left static.</td>
+      <td class="pri could">COULD</td></tr>
+</table>
+
+<h3>4.5 Caching</h3>
+<table class="t">
+  <thead><tr><th style="width:18mm">ID</th><th>Requirement</th>
+      <th style="width:18mm">Priority</th></tr></thead>
+  <tr><td class="id">FR-40</td>
+      <td>An exact cache by the hash of the canonicalized request. Router
+          extensions are not in the key: a session must not split the
+          cache.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-41</td>
+      <td>Only deterministic requests are cached. At a non-zero
+          temperature the user asks for variety, and a repeated answer
+          is a defect, not an optimization.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-42</td>
+      <td>The prompt block order is stable and is not rearranged by the
+          system: any permutation zeroes the provider's prefix cache
+          entirely.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-43</td>
+      <td>A semantic cache is allowed only with a cross-encoder
+          confirmation of the candidate and a separation of spaces by
+          system prompt, tool set, and language.</td>
+      <td class="pri could">COULD</td></tr>
+</table>
+
+<h3>4.6 Resilience</h3>
+<table class="t">
+  <thead><tr><th style="width:18mm">ID</th><th>Requirement</th>
+      <th style="width:18mm">Priority</th></tr></thead>
+  <tr><td class="id">FR-50</td>
+      <td>Provider errors are normalized into a single set of verdicts:
+          retry, switch, fatal, success.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-51</td>
+      <td>A retry to the same provider is allowed only for server errors
+          and timeouts, with exponential backoff and jitter.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-52</td>
+      <td>Limit exhaustion switches to the next candidate without
+          retries: a retry is guaranteed to get the same refusal.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-53</td>
+      <td>An invalid request terminates immediately. Descending the
+          plan will not fix an error in the request itself and only
+          wastes quota.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-54</td>
+      <td>A per-provider circuit breaker with states "closed — open —
+          probe"; a repeated failure in the probe state doubles the
+          pause up to a cap.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-55</td>
+      <td>During streaming, a switch is possible only before the first
+          byte sent to the client; after — the stream is honestly
+          broken.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-56</td>
+      <td>Plan exhaustion returns a structured error with the full path
+          of attempts.</td>
+      <td class="pri must">MUST</td></tr>
+</table>
+
+<h3>4.7 Observability</h3>
+<table class="t">
+  <thead><tr><th style="width:18mm">ID</th><th>Requirement</th>
+      <th style="width:18mm">Priority</th></tr></thead>
+  <tr><td class="id">FR-60</td>
+      <td>Every attempt is logged: the offering, the task class, the
+          tier, the classification source, the verdict, the latency, the
+          tokens.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-61</td>
+      <td>The classification source is written mandatorily — otherwise it
+          is impossible to tell whether the ML model improved routing or
+          merely complicated the system.</td>
+      <td class="pri must">MUST</td></tr>
+  <tr><td class="id">FR-62</td>
+      <td>A stats endpoint returns quota remainders, breaker states, the
+          cache hit rate, and a daily summary.</td>
+      <td class="pri should">SHOULD</td></tr>
+  <tr><td class="id">FR-63</td>
+      <td>Measured reliability is fed back into the registry and
+          participates in scoring.</td>
+      <td class="pri should">SHOULD</td></tr>
+</table>
+</div>
+
+<!-- ==================== 5 ==================== -->
+<div class="section">
+<h2><span class="num">5</span>Non-functional requirements</h2>
+
+<p>The numeric values are acceptance targets, not guarantees. Each must
+be measurable by the existing telemetry.</p>
+
+<table class="t">
+  <thead><tr><th style="width:18mm">ID</th><th style="width:30mm">Attribute</th>
+      <th>Requirement and verification</th></tr></thead>
+  <tr><td class="id">NFR-01</td><td>Overhead</td>
+      <td>The system's own latency (without the provider time) is no more
+          than 15 ms in the median with the ML classifier off. Verified
+          by comparing the total latency and the attempt latency.</td></tr>
+  <tr><td class="id">NFR-02</td><td>Classification latency</td>
+      <td>The deterministic level — fractions of a millisecond. The
+          embedding level — no more than 5 ms. A heavy encoder is called
+          for no more than 15 % of requests.</td></tr>
+  <tr><td class="id">NFR-03</td><td>Availability</td>
+      <td>A failure of all cloud providers does not cause a system
+          failure: the request is served by the local model. Verified by
+          an integration test with unavailable upstreams.</td></tr>
+  <tr><td class="id">NFR-04</td><td>Restart resilience</td>
+      <td>Daily quotas and the cache persist. Cold start — no more than 3
+          seconds until ready to accept requests.</td></tr>
+  <tr><td class="id">NFR-05</td><td>Accounting accuracy</td>
+      <td>The share of limit-exhaustion responses is less than 2 % of all
+          attempts with correct probing. An excess means a divergence of
+          the manifest from reality.</td></tr>
+  <tr><td class="id">NFR-06</td><td>Extensibility</td>
+      <td>Adding an OpenAI-compatible provider is a manifest edit, zero
+          lines of code. Adding a provider with a different protocol is
+          one new adapter with no change to the router and the
+          executor.</td></tr>
+  <tr><td class="id">NFR-07</td><td>Resources</td>
+      <td>The base mode needs no external services: no broker, no
+          separate DB, no vector store. ML layers install optionally.</td></tr>
+  <tr><td class="id">NFR-08</td><td>Security</td>
+      <td>Listening on the loopback or a private network interface, not
+          all addresses. Provider keys never leave the machine and never
+          enter logs or telemetry.</td></tr>
+  <tr><td class="id">NFR-09</td><td>Privacy</td>
+      <td>A request in strict privacy mode cannot be sent to a
+          data-training provider under any scoring state. Verified by a
+          separate test.</td></tr>
+  <tr><td class="id">NFR-10</td><td>Testability</td>
+      <td>Provider behavior is stubbed at the transport level;
+          integration checks of the degradation ladder run without the
+          network.</td></tr>
+</table>
+</div>
+
+<!-- ==================== 6 ==================== -->
+<div class="section">
+<h2><span class="num">6</span>Component breakdown</h2>
+
+<table class="t">
+  <thead><tr><th style="width:32mm">Component</th><th>Responsibility</th>
+      <th style="width:26mm">Requirements</th></tr></thead>
+  <tr><td><strong>Ingress</strong></td>
+      <td>Validation, normalization to the internal representation,
+          canonicalization, and computing the cache key.</td><td class="id">FR-01, FR-05, FR-40</td></tr>
+  <tr><td><strong>Cache</strong></td>
+      <td>The exact level with a TTL check; an interface for the semantic
+          level.</td><td class="id">FR-40…43</td></tr>
+  <tr><td><strong>Classifier</strong></td>
+      <td>Tier, task class, required capabilities, token estimate. A
+          cascade of levels with a shared embedding.</td><td class="id">FR-30, FR-31</td></tr>
+  <tr><td><strong>Registry</strong></td>
+      <td>The catalog of offerings: capabilities, limits, data policy,
+          measured metrics.</td><td class="id">FR-10…14</td></tr>
+  <tr><td><strong>Quota accounting</strong></td>
+      <td>Buckets, reservation, reconciliation, blocking by the provider
+          response, state persistence.</td><td class="id">FR-20…24</td></tr>
+  <tr><td><strong>Router</strong></td>
+      <td>Filter, scoring, plan building, sticky session binding.</td>
+      <td class="id">FR-32…38</td></tr>
+  <tr><td><strong>Breaker</strong></td>
+      <td>Provider state, pauses, probe requests.</td>
+      <td class="id">FR-54</td></tr>
+  <tr><td><strong>Executor</strong></td>
+      <td>Descending the plan, retries, the degradation ladder, spend
+          accounting.</td>
+      <td class="id">FR-50…56</td></tr>
+  <tr><td><strong>Adapter</strong></td>
+      <td>Translation to and from the provider protocol; error
+          normalization.</td>
+      <td class="id">FR-50</td></tr>
+  <tr><td><strong>Telemetry</strong></td>
+      <td>The attempt log, summaries, returning the measured reliability
+          to the registry.</td>
+      <td class="id">FR-60…63</td></tr>
+</table>
+
+<div class="note">
+  <span class="label">Separation rule</span>
+  The router makes a decision and executes nothing; the executor
+  executes and decides nothing. Violating this separation is the main
+  path to undebuggable routing, since the decision stops being
+  reproducible from the log.
+</div>
+</div>
+
+<!-- ==================== 7 ==================== -->
+<div class="section">
+<h2><span class="num">7</span>Key architectural decisions</h2>
+
+<div class="adr">
+  <h3>AR-01 · The facade mirrors OpenAI, not a custom protocol</h3>
+  <dl>
+    <dt>Context</dt><dd>Clients are already written for an existing
+      standard.</dd>
+    <dt>Decision</dt><dd>Full format compatibility; extensions are extra
+      fields stripped before sending to the provider.</dd>
+    <dt>Alternative</dt><dd>A custom protocol — rejected: requires
+      rewriting every client for zero benefit.</dd>
+    <dt>Consequence</dt><dd>The system is bounded by the expressiveness of
+      a foreign format; provider-specific features are unavailable without
+      extensions.</dd>
+  </dl>
+</div>
+
+<div class="adr">
+  <h3>AR-02 · Quota accounting is primary to scoring</h3>
+  <dl>
+    <dt>Context</dt><dd>Driver D1: the system's limit is rate and volume,
+      not cost.</dd>
+    <dt>Decision</dt><dd>The quota remainder enters the hard filter, and
+      the share of the daily limit enters scoring with a weight that
+      depends on the latency class.</dd>
+    <dt>Consequence</dt><dd>The objectively better model may be refused to
+      preserve the quota. This is intentional, not a defect.</dd>
+  </dl>
+</div>
+
+<div class="adr">
+  <h3>AR-03 · The data policy is a filter, not a weight</h3>
+  <dl>
+    <dt>Context</dt><dd>Driver D2: a free tier is paid for with request
+      content.</dd>
+    <dt>Decision</dt><dd>The default for cloud providers is "trains on
+      data"; an error this way is safe. Strict privacy mode cuts such
+      providers before scoring.</dd>
+    <dt>Consequence</dt><dd>Strict mode in practice means the local model
+      with all its quality limitations.</dd>
+  </dl>
+</div>
+
+<div class="adr">
+  <h3>AR-04 · The local model is the end of the cascade, not an emergency mode</h3>
+  <dl>
+    <dt>Context</dt><dd>The owner's machine can run a mid-size model at an
+      acceptable speed.</dd>
+    <dt>Decision</dt><dd>The local offering is always in the plan,
+      regardless of the scoring result.</dd>
+    <dt>Consequence</dt><dd>The system works without a single provider key.
+      A cloud failure degrades quality but not availability.</dd>
+  </dl>
+</div>
+
+<div class="adr">
+  <h3>AR-05 · Classification starts with rules, not a model</h3>
+  <dl>
+    <dt>Context</dt><dd>Some features are read from the request fields and
+      need no inference; there is no training data at the start.</dd>
+    <dt>Decision</dt><dd>The deterministic level is mandatory; ML levels
+      plug in via a flag and train on own telemetry.</dd>
+    <dt>Alternative</dt><dd>A ready-made complexity classifier in the hot
+      path — rejected: trained mostly on English, degrades on mixed
+      traffic, does not fit the latency budget.</dd>
+    <dt>Consequence</dt><dd>For the first weeks routing runs on
+      heuristics; this is a normal state, not incompleteness.</dd>
+  </dl>
+</div>
+
+<div class="adr">
+  <h3>AR-06 · One store, and it is embedded</h3>
+  <dl>
+    <dt>Context</dt><dd>Driver D4: one process, one user.</dd>
+    <dt>Decision</dt><dd>An embedded DB with journaling for quotas, the
+      cache, and telemetry; in-memory structures for the hot path.</dd>
+    <dt>Alternative</dt><dd>An external counter store — rejected:
+      in-process atomicity is enough, and the operating cost is
+      non-zero.</dd>
+    <dt>Consequence</dt><dd>A second process instance would diverge the
+      accounting. Runs strictly in one instance.</dd>
+  </dl>
+</div>
+</div>
+
+<!-- ==================== 8 ==================== -->
+<div class="section">
+<h2><span class="num">8</span>The degradation ladder</h2>
+
+<p>The order is strict. A move to the next step is possible only after
+the previous one is exhausted.</p>
+
+<table class="t">
+  <thead><tr><th style="width:12mm">Step</th><th style="width:44mm">Action</th>
+      <th>Condition of application</th></tr></thead>
+  <tr><td class="id">1</td><td>Retry to the same provider</td>
+      <td>Only a server error or a timeout. A bounded number of attempts,
+          backoff with jitter.</td></tr>
+  <tr><td class="id">2</td><td>Another key of the same provider</td>
+      <td>When several keys are available. Not applied on an auth
+          error.</td></tr>
+  <tr><td class="id">3</td><td>Another provider, same model</td>
+      <td>Relevant for open-weight models hosted at several
+          providers.</td></tr>
+  <tr><td class="id">4</td><td>Another model of the same tier</td>
+      <td>The next candidate of the plan.</td></tr>
+  <tr><td class="id">5</td><td>A local model</td>
+      <td>Always available. Quotas and the network do not
+          participate.</td></tr>
+  <tr><td class="id">6</td><td>An approximate answer from the semantic cache</td>
+      <td>Only with <code>enable_degraded_cache</code>: an L2 hit with a
+          lowered threshold and an <code>approximate: true</code> marker.
+          Serving it as fresh is not allowed. Available only before the
+          first byte sent to the client.</td></tr>
+  <tr><td class="id">7</td><td>A structured error</td>
+      <td>With the full path of attempts and the last refusal
+          reason.</td></tr>
+</table>
+
+<div class="note">
+  <span class="label">Streaming limitation</span>
+  Steps 1–6 are available only before the first byte sent to the client.
+  After it, the stream belongs to the chosen provider, and the only
+  correct behavior on a break is to honestly report the break, not to
+  swap the source mid-answer.
+</div>
+</div>
+
+<!-- ==================== 9 ==================== -->
+<div class="section">
+<h2><span class="num">9</span>Acceptance criteria</h2>
+
+<p>The wording is checkable: each maps to an automated test.</p>
+
+<table class="t">
+  <thead><tr><th style="width:18mm">ID</th><th>Criterion</th>
+      <th style="width:24mm">Covers</th></tr></thead>
+  <tr><td class="id">AC-01</td>
+      <td>A limit-exhaustion response switches to the next candidate
+          without a single retry to the refused one.</td><td class="id">FR-52</td></tr>
+  <tr><td class="id">AC-02</td>
+      <td>After a limit refusal, the next request to the same offering is
+          not sent: the accounting remembers the block.</td><td class="id">FR-22</td></tr>
+  <tr><td class="id">AC-03</td>
+      <td>A server error causes the prescribed number of retries, then a
+          switch.</td><td class="id">FR-51</td></tr>
+  <tr><td class="id">AC-04</td>
+      <td>An invalid request terminates on the first candidate; the rest
+          are not called.</td><td class="id">FR-53</td></tr>
+  <tr><td class="id">AC-05</td>
+      <td>A failure of all cloud providers results in a successful answer
+          from the local model.</td><td class="id">FR-36, NFR-03</td></tr>
+  <tr><td class="id">AC-06</td>
+      <td>Strict privacy mode produces not a single cloud call under any
+          score ratio.</td><td class="id">NFR-09</td></tr>
+  <tr><td class="id">AC-07</td>
+      <td>Repeated failures open the circuit; subsequent requests to the
+          provider are not sent until the pause expires.</td><td class="id">FR-54</td></tr>
+  <tr><td class="id">AC-08</td>
+      <td>After the provider recovers, a probe request closes the
+          circuit.</td>
+      <td class="id">FR-54</td></tr>
+  <tr><td class="id">AC-09</td>
+      <td>A repeated deterministic request is served from the cache without
+          calling the provider.</td><td class="id">FR-40</td></tr>
+  <tr><td class="id">AC-10</td>
+      <td>A request with a non-zero temperature bypasses the cache.</td>
+      <td class="id">FR-41</td></tr>
+  <tr><td class="id">AC-11</td>
+      <td>A difference in the session id does not change the cache
+          key.</td>
+      <td class="id">FR-40</td></tr>
+  <tr><td class="id">AC-12</td>
+      <td>Exhausting the daily quota excludes the offering from the next
+          request's plan.</td><td class="id">FR-20, FR-33</td></tr>
+  <tr><td class="id">AC-13</td>
+      <td>Quota state is restored after a process restart.</td>
+      <td class="id">FR-23</td></tr>
+  <tr><td class="id">AC-14</td>
+      <td>A model without the required capability never enters the plan,
+          at any speed advantage.</td><td class="id">FR-32, FR-33</td></tr>
+  <tr><td class="id">AC-15</td>
+      <td>Exceeding the context window excludes the offering.</td>
+      <td class="id">FR-33</td></tr>
+  <tr><td class="id">AC-16</td>
+      <td>The background latency class picks the offering with the larger
+          quota margin, the interactive one with the lower latency.</td>
+      <td class="id">FR-34</td></tr>
+</table>
+</div>
+
+<!-- ==================== 10 ==================== -->
+<div class="section">
+<h2><span class="num">10</span>Risks and open questions</h2>
+
+<table class="t">
+  <thead><tr><th style="width:40mm">Risk</th><th>Manifestation and mitigation</th></tr></thead>
+  <tr><td><strong>Manifest divergence from
+      reality</strong></td>
+      <td>Free-tier limits change without notice. Mitigation: regular
+          probing, trusting the response headers above the own counters,
+          a limit-refusal share metric as a staleness indicator.</td></tr>
+  <tr><td><strong>False hits of the semantic
+      cache</strong></td>
+      <td>Vector-close but opposite-meaning requests. The level is not
+          enabled without a confirming encoder and a threshold tuned on
+          own data. A threshold from an external source does not
+          apply.</td></tr>
+  <tr><td><strong>Prefix cache
+      devaluation</strong></td>
+      <td>Switching providers inside a dialogue zeroes the warmed
+          prefix. Mitigation: sticky binding and a ban on prompt block
+          rearrangement.</td></tr>
+  <tr><td><strong>Data leakage into free
+      tiers</strong></td>
+      <td>Relying on the request author's attentiveness is unreliable.
+          An automatic switch to strict mode on detecting personal data
+          is planned.</td></tr>
+  <tr><td><strong>Complexity without a
+      gain</strong></td>
+      <td>ML layers are more interesting than the basic ones, which
+          distorts priorities. Mitigation: the classification source in
+          the log and a requirement of an end-to-end comparison with the
+          heuristics before fixing the model.</td></tr>
+  <tr><td><strong>A single instance</strong></td>
+      <td>A second process would diverge the quota accounting. An
+          explicit launch lock is required, or a move to an external
+          counter if multi-process becomes needed.</td></tr>
+</table>
+
+<h3>Open questions</h3>
+<ol>
+  <li>The threshold at which a cascade with escalation is better than a
+      direct call to a strong model. Determined by measuring the failure
+      share on the cheap tier, not by a general guess.</li>
+  <li>The usefulness of a parallel duplicate request when the expected
+      latency is exceeded: a tail-latency win against doubling the quota
+      spend.</li>
+  <li>The scope of context compression: token savings against accuracy
+      loss and the destruction of the prefix cache.</li>
+  <li>How to get labels for training the classifier on mixed bilingual
+      traffic.</li>
+</ol>
+</div>
+
+<!-- ==================== 11 ==================== -->
+<div class="section">
+<h2><span class="num">11</span>Implementation stages</h2>
+
+<table class="t">
+  <thead><tr><th style="width:14mm">Stage</th><th style="width:52mm">Content</th>
+      <th>Completion sign</th></tr></thead>
+  <tr><td class="id">S1</td><td>The facade, adapters, the manifest, tier-based
+      routing</td><td>A single entry point works; clients are switched.</td></tr>
+  <tr><td class="id">S2</td><td>Quota accounting, the breaker, the
+      degradation ladder</td><td>The system stops failing on limit
+      exhaustion.</td></tr>
+  <tr><td class="id">S3</td><td>The exact cache, telemetry</td>
+      <td>Numbers appear that subsequent decisions are based on.</td></tr>
+  <tr><td class="id">S4</td><td>Probing, dynamic scoring</td>
+      <td>The registry reflects the measured reality, not the
+          documentation.</td></tr>
+  <tr><td class="id">S5</td><td>The embedding classifier, the cascade
+      verifier</td><td>End-to-end metrics beat the heuristics.</td></tr>
+  <tr><td class="id">S6</td><td>The semantic cache, trainable scoring, the
+      PII detector</td>
+      <td>Optimization on top of a working system.</td></tr>
+</table>
+
+<div class="note">
+  <span class="label">The order is mandatory</span>
+  Stages S5 and S6 are more interesting than the rest, which tempts to
+  start with them. Without quota accounting and the degradation ladder
+  the system will not survive the first day of real load, and without
+  telemetry the semantic-cache threshold tuning is done blind.
+</div>
+</div>
+
+</body>
+</html>

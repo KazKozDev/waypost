@@ -1,0 +1,19 @@
+{
+  "total_queries": 150,
+  "models_count": 6,
+  "p_best_model": "openrouter/deepseek/deepseek-chat:free",
+  "p_best": 0.8867,
+  "beta": 0.0,
+  "ceiling": 1.0,
+  "potential_gain": 0.1133,
+  "verdict": "Ensemble PROMISES improvement: Ceiling is 100.0% (+11.3% over openrouter/deepseek/deepseek-chat:free @ 88.7%). Proceed to Phase L.",
+  "model_accuracies": {
+    "local/qwen3:4b-instruct": 0.5467,
+    "mlx/Qwen3.8-27B-4bit": 0.82,
+    "mlx/Qwen3.8-27B-4bit:thinking": 0.8667,
+    "openrouter/deepseek/deepseek-chat:free": 0.8867,
+    "openrouter/google/gemma-4-26b-a4b-it:free": 0.8733,
+    "openrouter/meta-llama/llama-3.3-70b-instruct:free": 0.8733
+  },
+  "all_failed_count": 0
+}

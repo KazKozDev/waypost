@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "waypost",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": ["-m", "waypost.cli"],
+      "port": 8080
+    }
+  ]
+}

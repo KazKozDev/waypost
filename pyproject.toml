@@ -1,0 +1,37 @@
+[project]
+name = "waypost"
+version = "0.1.0"
+description = "A local LLM provider router with a focus on free tiers"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "httpx>=0.27",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "pyyaml>=6.0",
+    # Used by the core: semantic cache, bandit, classifier head.
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# Real embeddings instead of the lexical fallback (L1 classifier,
+# semantic cache, /v1/embeddings). The core works without them.
+ml = ["model2vec>=0.3"]
+# Cross-encoder to verify cache hits and /v1/rerank.
+rerank = ["sentence-transformers>=3.0"]
+# Context compression (LLMLingua-2). Enable only after your own measurements.
+compress = ["llmlingua>=0.2"]
+# Traffic-log clustering (scripts/cluster_logs.py).
+analysis = ["hdbscan>=0.8"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+waypost = "waypost.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["waypost*"]

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1f2e"/>
+      <stop offset="1" stop-color="#0b0e14"/>
+    </linearGradient>
+    <linearGradient id="post" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f4f6fb"/>
+      <stop offset="1" stop-color="#c7cdd9"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+  <!-- столб -->
+  <rect x="468" y="248" width="88" height="540" rx="20" fill="url(#post)"/>
+  <!-- нижняя стрелка-указатель вправо -->
+  <path d="M300 560 L300 440 L620 440 L620 380 L820 500 L620 620 L620 560 Z"
+        fill="#3b82f6"/>
+  <!-- верхняя стрелка-указатель влево -->
+  <path d="M724 360 L724 240 L404 240 L404 180 L204 300 L404 420 L404 360 Z"
+        fill="#22c55e"/>
+  <!-- основание/ком -->
+  <ellipse cx="512" cy="812" rx="120" ry="28" fill="#0b0e14" opacity="0.6"/>
+</svg>

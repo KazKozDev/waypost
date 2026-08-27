@@ -1,0 +1,1 @@
+sed -i '' 's/<script>/<script>\nwindow.onerror = function(msg, url, line, col, error) { alert("Error: " + msg + " at " + line + ":" + col); };\nwindow.addEventListener("unhandledrejection", function(e) { alert("Unhandled promise rejection: " + (e.reason && e.reason.message ? e.reason.message : e.reason)); });/' waypost/ui.py

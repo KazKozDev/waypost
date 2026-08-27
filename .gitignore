@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+var/
+.env
+.env.*
+*.bak
+.DS_Store
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+macos/generated/
