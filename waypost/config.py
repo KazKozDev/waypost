@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     port: int = 8080
     manifest_path: Path = Path("config/providers.yaml")
     db_path: Path = Path("var/router.db")
+    # Written by scripts/measure_beta.py; read by the setup page.
+    beta_path: Path = Path("data/beta_measurement.json")
 
     cache_ttl_s: int = 86_400
     request_timeout_s: float = 120.0

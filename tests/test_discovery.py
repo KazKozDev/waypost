@@ -2,6 +2,7 @@
 import pytest
 
 from waypost.discovery import _caps, _tier, discover_provider, is_free_openrouter
+from waypost.providers.openai_compat import ProviderError, Verdict
 from waypost.registry import Offering, Registry
 from waypost.schemas import Capability, Tier
 
@@ -28,8 +29,13 @@ class FakeAdapter:
     def __init__(self, models):
         self.models = models
 
-    async def list_models(self, o):
+    async def list_models(self, o, timeout=30.0):
         return self.models
+
+
+class FailingLocalAdapter:
+    async def list_models(self, o, timeout=30.0):
+        raise ProviderError(Verdict.RETRY, 408, "connection refused")
 
 
 def test_is_free_openrouter():
@@ -155,6 +161,7 @@ async def test_discover_local_backend():
             {"id": "qwen3:4b-instruct"},
             {"id": "llama3.2:3b"},
             {"id": "qwen3.6:27b"},
+            {"id": "cloud/deepseek-r1:70b"},
             {
                 "id": "nomic-embed-text:latest"
             },  # embedding model - should be filtered out
@@ -165,9 +172,10 @@ async def test_discover_local_backend():
     assert "ollama/qwen3:4b-instruct" in r["added"]
     assert "ollama/llama3.2:3b" in r["added"]
     assert "ollama/qwen3.6:27b" in r["added"]
+    assert "ollama/cloud/deepseek-r1:70b" in r["added"]
     assert "ollama/nomic-embed-text:latest" not in r["added"]
 
-    # Verify tiers
+    # Verify tiers and local vs cloud distribution
     qwen4b = registry.get("ollama/qwen3:4b-instruct")
     assert qwen4b is not None
     assert qwen4b.tier == Tier.S
@@ -176,6 +184,83 @@ async def test_discover_local_backend():
 
     llama3b = registry.get("ollama/llama3.2:3b")
     assert llama3b.tier == Tier.S
+    assert llama3b.is_local is True
 
     qwen27b = registry.get("ollama/qwen3.6:27b")
     assert qwen27b.tier == Tier.L
+    assert qwen27b.is_local is True
+
+    # Cloud-prefixed Ollama model must be marked as is_local = False
+    cloud_model = registry.get("ollama/cloud/deepseek-r1:70b")
+    assert cloud_model is not None
+    assert cloud_model.is_local is False
+    assert cloud_model.tier == Tier.L
+
+
+@pytest.mark.asyncio
+async def test_local_runtime_is_removed_from_routing_when_health_check_fails():
+    local = Offering(
+        provider="mlx",
+        model_id="qwen",
+        base_url="http://127.0.0.1:8081/v1",
+        is_local=True,
+        runtime_available=True,
+    )
+    registry = Registry([local])
+
+    result = await discover_provider(FailingLocalAdapter(), registry, local)
+
+    assert result["status"] == "error"
+    assert local.runtime_available is False
+    assert local.usable is False
+    assert registry.usable() == []
+
+
+@pytest.mark.asyncio
+async def test_local_runtime_requires_the_configured_model_and_recovers():
+    local = Offering(
+        provider="mlx",
+        model_id="qwen",
+        base_url="http://127.0.0.1:8081/v1",
+        is_local=True,
+        runtime_available=False,
+    )
+    registry = Registry([local])
+
+    missing = await discover_provider(FakeAdapter([{"id": "other"}]), registry, local)
+    assert missing["status"] == "ok"
+    assert local.usable is False
+
+    found = await discover_provider(FakeAdapter([{"id": "qwen"}]), registry, local)
+    assert found["status"] == "ok"
+    assert local.runtime_available is True
+    assert local.usable is True
+
+
+@pytest.mark.asyncio
+async def test_discover_ollama_cloud_provider():
+    provider = Offering(
+        provider="ollama",
+        model_id="seed",
+        base_url="https://ollama.com/v1",
+        is_local=False,
+    )
+    registry = Registry([])
+    adapter = FakeAdapter(
+        [
+            {"id": "qwen3.5:397b"},
+            {"id": "cloud/gpt-oss:120b"},
+        ]
+    )
+    r = await discover_provider(adapter, registry, provider)
+    assert r["status"] == "ok"
+    assert "ollama/cloud/qwen3.5:397b" in r["added"]
+    assert "ollama/cloud/gpt-oss:120b" in r["added"]
+
+    m1 = registry.get("ollama/cloud/qwen3.5:397b")
+    assert m1 is not None
+    assert m1.is_local is False
+
+    m2 = registry.get("ollama/cloud/gpt-oss:120b")
+    assert m2 is not None
+    assert m2.is_local is False

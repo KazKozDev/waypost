@@ -61,8 +61,13 @@ def _make_client(monkeypatch, handler):
     srv.settings = srv.Settings()
     original = httpx.AsyncClient
 
+    def with_local_discovery(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "qwen"}]})
+        return handler(request)
+
     def patched(*args, **kwargs):
-        kwargs["transport"] = httpx.MockTransport(handler)
+        kwargs["transport"] = httpx.MockTransport(with_local_discovery)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(httpx, "AsyncClient", patched)

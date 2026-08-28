@@ -7,15 +7,67 @@ Implements Part II of Waypost Spec v5:
 """
 from __future__ import annotations
 
+import base64
 import html
+import os
 from typing import Any
 
-FAVICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232b2620'/%3E%3Cpath d='M8 10h16M8 16h16M8 22h10' stroke='%23fbfaf7' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E"
+# Load branded Waypost logo PNG (macos/icon-96.png or asesst/waypost.png)
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_CANDIDATE_LOGOS = [
+    os.path.join(_ROOT, "macos", "icon-96.png"),
+    os.path.join(_ROOT, "asesst", "waypost.png"),
+    os.path.join(_ROOT, "macos", "icon.png"),
+    "macos/icon-96.png",
+    "asesst/waypost.png",
+]
 
-LOGO = """<svg width="22" height="22" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" style="border-radius:5px;flex-shrink:0;">
-  <rect width="32" height="32" rx="6" fill="#2b2620"/>
-  <path d="M8 10h16M8 16h16M8 22h10" stroke="#fbfaf7" stroke-width="2.5" stroke-linecap="round"/>
-</svg>"""
+_LOGO_URI = None
+for _p in _CANDIDATE_LOGOS:
+    if os.path.exists(_p):
+        try:
+            with open(_p, "rb") as _f:
+                _LOGO_URI = "data:image/png;base64," + base64.b64encode(
+                    _f.read()
+                ).decode("utf-8")
+            break
+        except Exception:
+            pass
+
+if not _LOGO_URI:
+    _LOGO_URI = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232b2620'/%3E%3Cpath d='M8 10h16M8 16h16M8 22h10' stroke='%23fbfaf7' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E"
+
+# Pure transparent glyph for large center badge
+_GLYPH_PATH = os.path.join(_ROOT, "macos", "glyph.png")
+_GLYPH_URI = None
+if os.path.exists(_GLYPH_PATH):
+    try:
+        with open(_GLYPH_PATH, "rb") as _gf:
+            _GLYPH_URI = "data:image/png;base64," + base64.b64encode(_gf.read()).decode(
+                "utf-8"
+            )
+    except Exception:
+        pass
+if not _GLYPH_URI:
+    _GLYPH_URI = _LOGO_URI
+
+FAVICON = _LOGO_URI
+LOGO = f'<img src="{_LOGO_URI}" width="22" height="22" alt="Waypost" style="border-radius:4px;flex-shrink:0;vertical-align:middle;object-fit:cover;">'
+# Chat avatar: the signpost drawn as an outline instead of the app icon.
+# The app icon is a dark rounded square — at 22px next to a line of text it
+# reads as a black block, and it cannot follow the light/dark theme. This
+# inherits currentColor, so one mark serves both themes.
+AVATAR_MARK = (
+    '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" '
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round" aria-label="Waypost" role="img">'
+    '<path d="M7 3v18"/>'
+    '<path d="M7 5.5h9.5l2.5 2.75-2.5 2.75H7"/>'
+    '<path d="M7 13.5h6.5l2.5 2.75-2.5 2.75H7"/>'
+    "</svg>"
+)
+
+LOGO_LARGE = f'<img src="{_GLYPH_URI}" width="70" height="70" alt="Waypost" style="object-fit:contain;">'
 
 
 def theme_css() -> str:
@@ -42,58 +94,106 @@ def theme_css() -> str:
   --blue-bg: #eff6ff;
   --radius-sm: 6px;
   --radius-md: 10px;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: "SF Mono", Monaco, Menlo, Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "SF Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono: "SF Mono", SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body {
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
   font-size: 13px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+input, button, select, textarea, optgroup, option {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+code, pre, kbd, samp, .mono, .font-mono, .mono-tag, .data-mono {
+  font-family: var(--font-mono);
+}
+
+h1, h2, h3, h4, h5, h6, .brand-title, .brand-name, .page-title, .section-title {
+  font-family: var(--font-sans);
 }
 
 /* Nav Header */
 .top-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
-  padding: 10px 24px;
+  padding: 8px 24px;
   background: var(--card);
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 100;
 }
-.brand-group {
+.macos-app .top-header,
+html.macos-app .top-header,
+body.macos-app .top-header {
+  padding-left: 20px;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+.macos-app .top-header .header-left {
+  width: 72px;
+}
+.top-header .header-left {
   display: flex;
   align-items: center;
-  gap: 10px;
+  grid-column: 1;
+}
+.top-header .brand-center,
+.top-header .brand-group,
+.top-header .brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-decoration: none;
   color: var(--text);
+  grid-column: 2;
 }
-.brand-title {
-  font-size: 16px;
+.brand-title, .brand-name {
+  font-size: 15px;
   font-weight: 700;
   letter-spacing: -0.01em;
+  color: var(--text);
 }
 .brand-tag {
-  font-size: 11px;
-  background: var(--bg-subtle);
-  color: var(--text-secondary);
-  padding: 2px 7px;
-  border-radius: 4px;
-  font-weight: 600;
+  display: none;
 }
-.nav-links {
+.top-header .nav-links,
+.top-header .nav-tabs {
   display: flex;
   gap: 4px;
   background: var(--bg-subtle);
   padding: 3px;
   border-radius: var(--radius-sm);
+  justify-self: end;
+  grid-column: 3;
+}
+.macos-app .top-header .brand-center,
+.macos-app .top-header .brand-group,
+.macos-app .top-header .brand,
+.macos-app .top-header .nav-links,
+.macos-app .top-header .nav-tabs,
+.macos-app .top-header a,
+.macos-app .top-header button,
+.macos-app .top-header input,
+.macos-app .top-header select {
+  -webkit-app-region: no-drag;
 }
 .nav-link {
   padding: 6px 14px;
@@ -154,6 +254,19 @@ body {
 .badge-fail { background: var(--red-bg); color: var(--red); }
 .badge-info { background: var(--blue-bg); color: var(--blue); }
 .badge-neutral { background: var(--bg-subtle); color: var(--text-secondary); }
+.live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 2px rgba(42, 122, 76, 0.2);
+  animation: pulse-dot 2s infinite ease-in-out;
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.85); }
+}
 
 table.data-table {
   width: 100%;
@@ -230,14 +343,14 @@ details[open] .accordion-arrow {
 
 def nav_header(active: str = "chat") -> str:
     return f"""<header class="top-header claude-header">
-  <a href="/chat" class="brand-group brand">
-    {LOGO}
+  <div class="header-left"></div>
+  <a href="/chat" class="brand-center brand">
     <span class="brand-title brand-name">Waypost</span>
-    <span class="brand-tag brand-badge">v5</span>
   </a>
   <nav class="nav-links nav-tabs">
     <a href="/chat" class="nav-link nav-tab {'active' if active == 'chat' else ''}">Chat</a>
     <a href="/dashboard" class="nav-link nav-tab {'active' if active == 'dashboard' else ''}">Dashboard</a>
+    <a href="/providers" class="nav-link nav-tab {'active' if active == 'providers' else ''}">Providers</a>
     <a href="/setup" class="nav-link nav-tab {'active' if active == 'setup' else ''}">Setup</a>
   </nav>
 </header>"""
@@ -270,7 +383,8 @@ def render_dashboard_html(data: dict[str, Any]) -> str:
         <span style="font-weight:600">Escalation Rate: <span class="mono">{esc_rate:.1f}%</span></span>
         {coverage_alert}
       </div>
-      <div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span class="live-dot" title="Live Auto-Polling Active (4s)"></span>
         <span class="badge {'badge-pass' if 'operational' in urgent_warning.lower() else 'badge-warn'}">{urgent_warning}</span>
       </div>
     </div>
@@ -313,21 +427,29 @@ def render_dashboard_html(data: dict[str, Any]) -> str:
     for q in quotas:
         name = q.get("provider", "—")
         pct = q.get("used_pct", 0)
-        burn_rate = q.get("burn_rate", "—")
-        binding = q.get("binding", "requests")
-        eta = q.get("exhaustion_eta", "will last until reset")
-        is_warn = pct > 80
-        bar_fill = int(pct / 10)
-        bar_str = "█" * bar_fill + "░" * (10 - bar_fill)
+        burn_rate = q.get("burn_rate", "0/min")
+        binding = q.get("binding", "—")
+        eta = q.get("exhaustion_eta", "100% capacity available")
+        rem_summary = q.get("remaining_summary", "")
+        used_summary = q.get("used_summary", "")
+        is_warn = pct > 80 or q.get("is_blocked", False)
+
+        if pct > 0:
+            bar_fill = max(1, min(10, int(pct / 10)))
+            bar_str = "█" * bar_fill + "░" * (10 - bar_fill)
+            usage_html = f'<span class="mono" style="font-weight:600">{bar_str} {pct:.0f}%</span> <span class="mono" style="color:var(--text-secondary);font-size:11px">({html.escape(used_summary)})</span>'
+        else:
+            usage_html = f'<span class="badge badge-success">100% free</span> <span class="mono" style="color:var(--text-secondary);font-size:11px">({html.escape(rem_summary)})</span>'
+
         quota_rows_html.append(
             f"""
         <tr>
           <td style="font-weight:600">{html.escape(name)}</td>
-          <td class="mono">{bar_str} {pct:.0f}%</td>
-          <td class="mono">{burn_rate}</td>
-          <td><span class="badge badge-neutral">binding: {binding}</span></td>
+          <td>{usage_html}</td>
+          <td class="mono">{html.escape(burn_rate)}</td>
+          <td><span class="badge badge-neutral">{html.escape(binding)}</span></td>
           <td style="color:{'var(--amber)' if is_warn else 'var(--text-secondary)'};font-weight:{'600' if is_warn else 'normal'}">
-            → {html.escape(eta)} {'⚠️' if is_warn else ''}
+            → {html.escape(eta)}
           </td>
         </tr>
         """
@@ -358,6 +480,16 @@ def render_dashboard_html(data: dict[str, Any]) -> str:
     loc_p95 = latencies.get("local_p95", 0)
     cld_p50 = latencies.get("cloud_p50", 0)
     cld_p95 = latencies.get("cloud_p95", 0)
+    loc_n = latencies.get("local_n", 0)
+    cld_n = latencies.get("cloud_n", 0)
+
+    def _lat(ms: float, n: int) -> str:
+        """A local answer runs into tens of seconds — printing that as a
+        five-digit ms number hides the scale. And zero samples is "no
+        data", not "instant"."""
+        if not n:
+            return "no data"
+        return f"{ms / 1000:.1f}s" if ms >= 1000 else f"{int(ms)}ms"
 
     esc_reasons_html = []
     for r_name, r_cnt in escalations.items():
@@ -377,11 +509,13 @@ def render_dashboard_html(data: dict[str, Any]) -> str:
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px;">
           <div style="background:var(--bg-subtle);padding:12px;border-radius:var(--radius-sm);">
             <div style="font-size:11px;color:var(--text-secondary)">Local P50 / P95</div>
-            <div class="mono" style="font-size:16px;font-weight:700">{loc_p50}ms / {loc_p95}ms</div>
+            <div class="mono" style="font-size:16px;font-weight:700">{_lat(loc_p50, loc_n)} / {_lat(loc_p95, loc_n)}</div>
+            <div style="font-size:10px;color:var(--text-muted)">{loc_n} samples · 24h</div>
           </div>
           <div style="background:var(--bg-subtle);padding:12px;border-radius:var(--radius-sm);">
             <div style="font-size:11px;color:var(--text-secondary)">Cloud P50 / P95</div>
-            <div class="mono" style="font-size:16px;font-weight:700">{cld_p50}ms / {cld_p95}ms</div>
+            <div class="mono" style="font-size:16px;font-weight:700">{_lat(cld_p50, cld_n)} / {_lat(cld_p95, cld_n)}</div>
+            <div style="font-size:10px;color:var(--text-muted)">{cld_n} samples · 24h</div>
           </div>
         </div>
       </div>
@@ -425,9 +559,8 @@ def render_dashboard_html(data: dict[str, Any]) -> str:
 
     models_block = f"""
     <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <div style="margin-bottom:12px;">
         <div class="section-title" style="margin:0">Active Models (Top 5)</div>
-        <a href="/setup" style="font-size:12px;color:var(--text-secondary);text-decoration:none">View all in Setup →</a>
       </div>
       <table class="data-table">
         <thead>
@@ -482,7 +615,7 @@ def render_dashboard_html(data: dict[str, Any]) -> str:
 </head>
 <body>
 {nav_header('dashboard')}
-<div class="page-container">
+<div class="page-container" id="dashboard-container">
   {status_bar}
   {funnel_block}
   {lat_esc_block}
@@ -490,6 +623,47 @@ def render_dashboard_html(data: dict[str, Any]) -> str:
   {traces_block}
   {quota_table}
 </div>
+<script>
+(function() {{
+  let isPolling = false;
+  async function refreshDashboard() {{
+    if (document.hidden || isPolling) return;
+    isPolling = true;
+    try {{
+      const res = await fetch(window.location.href, {{
+        headers: {{ 'X-Requested-With': 'WaypostLivePoll' }}
+      }});
+      if (!res.ok) return;
+      const htmlText = await res.text();
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(htmlText, 'text/html');
+      const newContainer = doc.getElementById('dashboard-container');
+      const currentContainer = document.getElementById('dashboard-container');
+      if (newContainer && currentContainer) {{
+        // Preserve accordion open state
+        const openSet = new Set();
+        currentContainer.querySelectorAll('details[open]').forEach(d => {{
+          const sumText = d.querySelector('summary') ? d.querySelector('summary').textContent.trim() : '';
+          if (sumText) openSet.add(sumText);
+        }});
+        newContainer.querySelectorAll('details').forEach(d => {{
+          const sumText = d.querySelector('summary') ? d.querySelector('summary').textContent.trim() : '';
+          if (sumText && openSet.has(sumText)) {{
+            d.open = true;
+          }}
+        }});
+        currentContainer.innerHTML = newContainer.innerHTML;
+      }}
+    }} catch (e) {{
+      // Ignore background fetch errors
+    }} finally {{
+      isPolling = false;
+    }}
+  }}
+  // Auto-poll every 4 seconds
+  setInterval(refreshDashboard, 4000);
+}})();
+</script>
 </body></html>"""
 
 
@@ -525,13 +699,23 @@ def render_setup_html(data: dict[str, Any]) -> str:
     # Local engines & memory
     engine_cards = []
     for e in engines:
+        used, cap = e.get("mem_used_gb"), e.get("mem_limit_gb")
+        # Physical footprint, not RSS — see waypost/sysmem.py. Still
+        # "not reported" when nothing could be measured: an engine nobody
+        # measured must not be dressed up as a zero.
+        if used is None:
+            mem = "Memory: not reported"
+        elif cap:
+            mem = f"Memory: {used:.1f} GB of {cap:.0f} GB RAM"
+        else:
+            mem = f"Memory: {used:.1f} GB"
         engine_cards.append(
             f"""
         <div style="background:var(--bg-subtle);padding:14px;border-radius:var(--radius-sm)">
           <div style="font-weight:700;margin-bottom:4px">{html.escape(e.get('name', ''))}</div>
           <div style="font-size:12px;color:var(--text-secondary);margin-bottom:2px">Model: <b>{html.escape(e.get('model', ''))}</b></div>
-          <div class="mono" style="font-size:12px">Memory: {e.get('mem_used_gb', 0):.1f} GB / {e.get('mem_limit_gb', 22):.1f} GB cap</div>
-          <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Warmup status: {html.escape(e.get('warmup_status', 'ready'))}</div>
+          <div class="mono" style="font-size:12px">{html.escape(mem)}</div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Status: {html.escape(e.get('warmup_status', 'ready'))}</div>
         </div>
         """
         )
@@ -557,7 +741,7 @@ def render_setup_html(data: dict[str, Any]) -> str:
 </head>
 <body>
 {nav_header('setup')}
-<div class="page-container">
+<div class="page-container" id="setup-container">
 
   <!-- Section 1: Subsystems -->
   <div class="card">
@@ -570,7 +754,7 @@ def render_setup_html(data: dict[str, Any]) -> str:
 
   <!-- Section 2: Local Engines & Memory -->
   <div class="card">
-    <div class="section-title">Local Engines & Metal Memory (32 GB Machine)</div>
+    <div class="section-title">Local Engines</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:16px;margin-top:10px;">
       {''.join(engine_cards)}
     </div>
@@ -626,177 +810,440 @@ def render_setup_html(data: dict[str, Any]) -> str:
   </div>
 
 </div>
+<script>
+(function() {{
+  let isPolling = false;
+  async function refreshSetup() {{
+    if (document.hidden || isPolling) return;
+    isPolling = true;
+    try {{
+      const res = await fetch(window.location.href, {{
+        headers: {{ 'X-Requested-With': 'WaypostLivePoll' }}
+      }});
+      if (!res.ok) return;
+      const htmlText = await res.text();
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(htmlText, 'text/html');
+      const newContainer = doc.getElementById('setup-container');
+      const currentContainer = document.getElementById('setup-container');
+      if (newContainer && currentContainer) {{
+        currentContainer.innerHTML = newContainer.innerHTML;
+      }}
+    }} catch (e) {{
+      // Ignore background fetch errors
+    }} finally {{
+      isPolling = false;
+    }}
+  }}
+  // Auto-poll every 5 seconds
+  setInterval(refreshSetup, 5000);
+}})();
+</script>
+</body></html>"""
+
+
+def render_providers_html(data: dict[str, Any]) -> str:
+    """Renders an ultra-minimalist Providers & Keys interface."""
+    providers = data.get("providers", [])
+    summary = data.get("summary", {})
+    total_provs = summary.get("total_providers", len(providers))
+    configured_keys = summary.get("configured_keys", 0)
+
+    rows = []
+    for p in providers:
+        p_id = html.escape(p.get("id", ""))
+        name = html.escape(p.get("name", ""))
+        env_var = html.escape(p.get("env_var", ""))
+        doc_url = html.escape(p.get("doc_url", ""))
+        has_key = p.get("has_key", False)
+        masked = html.escape(p.get("masked_key", ""))
+
+        dot_style = (
+            "background:var(--green);box-shadow:0 0 0 2px rgba(42,122,76,0.15);"
+            if has_key
+            else "background:var(--border);"
+        )
+        remove_style = "" if has_key else "display:none;"
+
+        link_html = (
+            f"""<a href="{doc_url}" target="_blank" rel="noopener noreferrer" class="provider-link-arrow" title="Get API key for {name} &rarr;" style="color:var(--text-muted);display:inline-flex;align-items:center;text-decoration:none;transition:all 0.15s ease;padding:2px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17l9.2-9.2M17 17V7H7"/></svg></a>"""
+            if doc_url
+            else ""
+        )
+
+        rows.append(
+            f"""
+      <div class="prov-row" id="row-{p_id}" style="display:flex;align-items:center;justify-content:space-between;padding:12px 24px;border-bottom:1px solid var(--border-light);gap:20px;">
+        <div style="display:flex;align-items:center;gap:10px;width:190px;min-width:190px;flex-shrink:0;">
+          <span class="status-dot" id="dot-{p_id}" style="width:7px;height:7px;border-radius:50%;{dot_style}flex-shrink:0;"></span>
+          <span style="font-size:14px;font-weight:600;color:var(--text);white-space:nowrap;">{name}</span>
+          {link_html}
+        </div>
+
+        <div style="display:flex;align-items:center;gap:10px;flex:1;">
+          <input type="password" id="input-{p_id}" class="mono" style="padding:8px 14px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--text);font-size:12.5px;width:100%;outline:none;transition:border-color 0.15s ease;" placeholder="{masked or 'Paste ' + env_var + '...'}" autocomplete="off" onkeydown="if(event.key==='Enter') saveKey('{p_id}', '{env_var}')" />
+          <button type="button" class="btn-save" style="padding:8px 18px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.15s ease;" onclick="saveKey('{p_id}', '{env_var}')">Save</button>
+          <button type="button" class="btn-remove" id="remove-{p_id}" style="padding:8px 14px;background:var(--card);color:var(--text-muted);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.15s ease;{remove_style}" onclick="removeKey('{p_id}', '{env_var}', '{name}')">Remove</button>
+        </div>
+      </div>
+"""
+        )
+
+    rows_html = "\n".join(rows)
+
+    return f"""<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Waypost — Providers</title>
+<link rel=icon href="{FAVICON}">
+<style>
+{theme_css()}
+.prov-row:last-child {{
+  border-bottom: none !important;
+}}
+.provider-link-arrow:hover {{
+  color: var(--terracotta) !important;
+  transform: translate(1px, -1px);
+}}
+.btn-save:hover {{
+  background: var(--bg-subtle) !important;
+  border-color: var(--text-muted) !important;
+}}
+input:focus {{
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px rgba(217, 119, 87, 0.15) !important;
+}}
+</style>
+</head>
+<body>
+{nav_header('providers')}
+<div class="page-container" id="providers-container">
+
+  <div class="card" style="padding:0;border-radius:var(--radius-md);overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.03);">
+    <div style="padding:14px 24px;border-bottom:1px solid var(--border-light);display:flex;align-items:center;justify-content:space-between;background:var(--bg-subtle);">
+      <span style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-secondary);">Providers & API Keys</span>
+      <span style="font-size:12px;color:var(--text-muted);font-family:var(--font-mono);font-weight:600;">{configured_keys} / {total_provs} active</span>
+    </div>
+
+    <div>
+      {rows_html}
+    </div>
+  </div>
+
+</div>
+
+<div id="toast" style="position:fixed;bottom:24px;right:24px;background:var(--card);border:1px solid var(--border);box-shadow:0 8px 24px rgba(0,0,0,0.15);border-radius:var(--radius-md);padding:12px 18px;font-size:13px;font-weight:500;color:var(--text);transform:translateY(100px);opacity:0;transition:all 0.25s cubic-bezier(0.16, 1, 0.3, 1);z-index:1000;"></div>
+
+<script>
+function showToast(msg, isErr) {{
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.borderColor = isErr ? 'var(--red)' : 'var(--accent)';
+  t.style.transform = 'translateY(0)';
+  t.style.opacity = '1';
+  setTimeout(() => {{
+    t.style.transform = 'translateY(100px)';
+    t.style.opacity = '0';
+  }}, 3500);
+}}
+
+async function saveKey(pId, envVar) {{
+  const inp = document.getElementById('input-' + pId);
+  const val = inp ? inp.value.trim() : '';
+  // The field is cleared after every save, so an empty one is the normal
+  // resting state — it must never be read as "delete this key".
+  if (!val) {{
+    showToast('Nothing to save — paste a key first', true);
+    return;
+  }}
+  try {{
+    const res = await fetch('/v1/providers/keys', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ env_var: envVar, api_key: val, provider: pId }})
+    }});
+    const d = await res.json();
+    if (res.ok) {{
+      showToast(d.message || 'Key saved successfully');
+      inp.value = '';
+      if (d.masked_key) inp.placeholder = d.masked_key;
+      const dotEl = document.getElementById('dot-' + pId);
+      if (dotEl) {{
+        dotEl.style.background = 'var(--green)';
+        dotEl.style.boxShadow = '0 0 0 2px rgba(42,122,76,0.15)';
+      }}
+      const rmEl = document.getElementById('remove-' + pId);
+      if (rmEl) rmEl.style.display = '';
+    }} else {{
+      showToast(d.detail || 'Failed to update key', true);
+    }}
+  }} catch (err) {{
+    showToast('Error: ' + err.message, true);
+  }}
+}}
+
+async function removeKey(pId, envVar, name) {{
+  // Deleting a key wipes it from .env, the Keychain and the running
+  // process at once. It is not recoverable from here — ask first.
+  if (!confirm('Remove the ' + name + ' key (' + envVar + ')? '
+      + 'It will be deleted from .env and the macOS Keychain, '
+      + 'and you will have to paste it again to restore it.')) return;
+  try {{
+    const res = await fetch('/v1/providers/keys', {{
+      method: 'DELETE',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ env_var: envVar }})
+    }});
+    const d = await res.json();
+    if (res.ok) {{
+      showToast(d.message || 'Key removed');
+      const inp = document.getElementById('input-' + pId);
+      if (inp) {{ inp.value = ''; inp.placeholder = 'Paste ' + envVar + '...'; }}
+      const dotEl = document.getElementById('dot-' + pId);
+      if (dotEl) {{
+        dotEl.style.background = 'var(--border)';
+        dotEl.style.boxShadow = 'none';
+      }}
+      const rmEl = document.getElementById('remove-' + pId);
+      if (rmEl) rmEl.style.display = 'none';
+    }} else {{
+      showToast(d.detail || 'Failed to remove key', true);
+    }}
+  }} catch (err) {{
+    showToast('Error: ' + err.message, true);
+  }}
+}}
+</script>
 </body></html>"""
 
 
 def render_chat_html() -> str:
-    """Renders the Anthropic Claude-style interactive web chat interface."""
-    return f"""<!doctype html><html lang=en><head><meta charset=utf-8>
+    """Renders the Anthropic Claude / Waypost-styled interactive web chat interface."""
+    tmpl = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Waypost — Chat</title>
-<link rel=icon href="{FAVICON}">
+<link rel=icon href="__FAVICON__">
 <style>
-{theme_css()}
+__THEME_CSS__
 
-html, body {{
+html, body {
   height: 100%;
   overflow: hidden;
-}}
-.chat-app {{
+}
+.chat-app {
   display: flex;
   flex-direction: column;
   height: 100vh;
   background: var(--bg);
-}}
-.chat-topbar {{
+  position: relative;
+}
+.chat-topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 24px;
-  background: var(--card);
-  border-bottom: 1px solid var(--border);
+  padding: 10px 24px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border-light);
   gap: 12px;
   flex-wrap: wrap;
-}}
-.model-pill {{
+}
+.model-pill {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: var(--bg-subtle);
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 4px 10px;
-  font-size: 13px;
+  padding: 5px 12px;
+  font-size: 12.5px;
   font-weight: 500;
-}}
-.model-select {{
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+.model-indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--terracotta);
+  flex-shrink: 0;
+}
+.model-select {
   background: transparent;
   border: none;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 12.5px;
+  font-weight: 500;
   color: var(--text);
   outline: none;
   cursor: pointer;
   font-family: var(--font-sans);
-}}
-.chat-options {{
+}
+.chat-options {
   display: flex;
   align-items: center;
-  gap: 14px;
-  font-size: 12px;
+  gap: 16px;
+  font-size: 12.5px;
   color: var(--text-secondary);
-}}
-.chat-options label {{
+}
+.chat-options label {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   cursor: pointer;
-}}
-.btn-icon {{
-  background: transparent;
+  user-select: none;
+  font-weight: 500;
+}
+.chat-options input[type="checkbox"] {
+  accent-color: var(--terracotta);
+  cursor: pointer;
+}
+.btn-icon {
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  color: var(--text-secondary);
-  padding: 4px 10px;
+  color: var(--text);
+  padding: 5px 14px;
   cursor: pointer;
   font-size: 12px;
   font-weight: 500;
   transition: all 0.15s ease;
-}}
-.btn-icon:hover {{
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+.btn-icon:hover {
   background: var(--bg-subtle);
-  color: var(--text);
-}}
+}
 
 /* Message stream */
-.chat-messages {{
+.chat-messages {
   flex: 1;
   overflow-y: auto;
   padding: 24px 20px;
   scroll-behavior: smooth;
-}}
-.messages-inner {{
+}
+.messages-inner {
   max-width: 820px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 24px;
-}}
+}
 
-/* Welcome Hero */
-.welcome-hero {{
+/* Welcome Hero - Double Substrate Badge */
+.welcome-hero {
   text-align: center;
-  padding: 48px 20px 20px;
+  padding: 36px 20px 20px;
   margin: auto 0;
-}}
-.welcome-icon {{
+}
+.welcome-badge-wrap {
+  margin-bottom: 22px;
+  display: inline-block;
+}
+.welcome-badge-outer {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 56px;
-  height: 56px;
-  border-radius: var(--radius-md);
-  background: var(--bg-subtle);
-  color: var(--text);
+  width: 96px;
+  height: 96px;
+  border-radius: 26px;
+  background: var(--card);
   border: 1px solid var(--border);
-  margin-bottom: 16px;
-}}
-.welcome-title {{
+  box-shadow: 0 10px 28px -4px rgba(0,0,0,0.06), 0 2px 8px -1px rgba(0,0,0,0.03);
+  padding: 8px;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.welcome-badge-outer:hover {
+  transform: translateY(-2px) scale(1.02);
+  box-shadow: 0 16px 36px -4px rgba(0,0,0,0.08), 0 4px 12px -2px rgba(0,0,0,0.04);
+}
+.welcome-badge-inner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border-radius: 18px;
+  background: #1c1b18;
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,0.15), 0 2px 8px rgba(0,0,0,0.25);
+}
+.welcome-badge-inner img {
+  width: 68px;
+  height: 68px;
+  object-fit: contain;
+}
+.welcome-title {
   font-family: var(--font-sans);
-  font-size: 24px;
+  font-size: 26px;
   font-weight: 700;
   color: var(--text);
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   letter-spacing: -0.02em;
-}}
-.welcome-sub {{
+}
+.welcome-sub {
   color: var(--text-secondary);
   font-size: 13.5px;
-  max-width: 500px;
-  margin: 0 auto 32px;
+  max-width: 560px;
+  margin: 0 auto 34px;
   line-height: 1.5;
-}}
-.prompt-chips {{
+}
+.prompt-chips {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 12px;
-  max-width: 660px;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+  max-width: 740px;
   margin: 0 auto;
-}}
-.prompt-chip {{
+}
+@media (max-width: 680px) {
+  .prompt-chips {
+    grid-template-columns: 1fr;
+  }
+}
+.prompt-chip {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 14px 16px;
+  padding: 16px 18px;
   font-size: 13px;
   color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 14px;
   text-align: left;
   cursor: pointer;
   transition: all 0.15s ease;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-}}
-.prompt-chip:hover {{
-  border-color: var(--accent);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+}
+.prompt-chip:hover {
+  border-color: var(--terracotta);
   background: var(--card);
   transform: translateY(-1px);
-  box-shadow: 0 4px 8px rgba(0,0,0,0.06);
-}}
+  box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+}
+.prompt-chip-icon {
+  color: var(--terracotta);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.prompt-chip-text {
+  flex: 1;
+  line-height: 1.4;
+  font-weight: 500;
+}
 
 /* Message items */
-.message-row {{
+.message-row {
   display: flex;
   gap: 14px;
   width: 100%;
-}}
-.message-row.user {{
+}
+.message-row.user {
   justify-content: flex-end;
-}}
-.message-bubble {{
+}
+.message-bubble {
   max-width: 85%;
   font-size: 14px;
   line-height: 1.6;
-}}
-.message-row.user .message-bubble {{
+}
+.message-row.user .message-bubble {
   background: var(--card);
   border: 1px solid var(--border);
   padding: 12px 18px;
@@ -805,31 +1252,32 @@ html, body {{
   color: var(--text);
   white-space: pre-wrap;
   font-weight: 450;
-}}
-.message-row.assistant {{
+}
+.message-row.assistant {
   justify-content: flex-start;
-}}
-.assistant-avatar {{
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-sm);
-  background: var(--card);
+  align-items: flex-start;
+}
+.assistant-avatar {
+  /* The first line of the reply is 14px * 1.6 = 22.4px tall. A 22px mark
+     with no top offset puts its centre on that line's centre; the old
+     32px box sat ~7px below the text it belongs to. No background or
+     border: the mark is a bare outline that inherits this colour. */
+  width: 22px;
+  height: 22px;
   color: var(--text);
-  border: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  margin-top: 2px;
-}}
-.message-row.assistant .message-bubble {{
+}
+.message-row.assistant .message-bubble {
   flex: 1;
   color: var(--text);
-}}
-.router-pill {{
+}
+.router-pill {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   background: var(--bg-subtle);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -838,112 +1286,119 @@ html, body {{
   color: var(--text-secondary);
   margin-top: 10px;
   font-family: var(--font-mono);
-}}
-.router-pill b {{ color: var(--text); }}
+}
+.router-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+}
+.router-pill b { color: var(--text); }
 
 /* Markdown typography */
-.message-bubble h1, .message-bubble h2, .message-bubble h3 {{
+.message-bubble h1, .message-bubble h2, .message-bubble h3 {
   font-family: var(--font-sans);
   margin: 16px 0 8px;
   font-weight: 600;
   color: var(--text);
   letter-spacing: -0.01em;
-}}
-.message-bubble h1 {{ font-size: 19px; }}
-.message-bubble h2 {{ font-size: 16px; }}
-.message-bubble h3 {{ font-size: 14px; }}
-.message-bubble p {{ margin: 0 0 12px; }}
-.message-bubble p:last-child {{ margin-bottom: 0; }}
-.message-bubble ul, .message-bubble ol {{
+}
+.message-bubble h1 { font-size: 19px; }
+.message-bubble h2 { font-size: 16px; }
+.message-bubble h3 { font-size: 14px; }
+.message-bubble p { margin: 0 0 12px; }
+.message-bubble p:last-child { margin-bottom: 0; }
+.message-bubble ul, .message-bubble ol {
   margin: 8px 0 12px;
   padding-left: 22px;
-}}
-.message-bubble li {{ margin-bottom: 4px; }}
-.message-bubble blockquote {{
+}
+.message-bubble li { margin-bottom: 4px; }
+.message-bubble blockquote {
   margin: 12px 0;
   padding: 6px 14px;
   border-left: 3px solid var(--text-muted);
   color: var(--text-secondary);
   background: var(--bg-subtle);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-}}
-.message-bubble code {{
+}
+.message-bubble code {
   font-family: var(--font-mono);
   font-size: 12.5px;
   background: var(--bg-subtle);
   border: 1px solid var(--border-light);
   padding: 2px 6px;
   border-radius: 4px;
-}}
-.code-block-wrap {{
+}
+.code-block-wrap {
   position: relative;
   margin: 14px 0;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
+  background: #18181b;
+  border-radius: var(--radius-md);
+  border: 1px solid #27272a;
   overflow: hidden;
-  background: var(--card);
-}}
-.code-header {{
+}
+.code-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 6px 12px;
-  background: var(--bg-subtle);
-  border-bottom: 1px solid var(--border-light);
-  font-size: 11px;
-  color: var(--text-muted);
+  background: #27272a;
   font-family: var(--font-mono);
-  text-transform: uppercase;
-}}
-.btn-copy {{
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
   font-size: 11px;
-  cursor: pointer;
-  padding: 2px 8px;
+  color: #a1a1aa;
+  border-bottom: 1px solid #3f3f46;
+}
+.btn-copy {
+  background: transparent;
+  border: 1px solid #3f3f46;
   border-radius: 4px;
-  transition: all 0.15s ease;
-}}
-.btn-copy:hover {{ background: var(--card); color: var(--text); }}
-.code-block-wrap pre {{
+  color: #d4d4d8;
+  font-size: 10.5px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.btn-copy:hover {
+  background: #3f3f46;
+  color: #fff;
+}
+.code-block-wrap pre {
   margin: 0;
   padding: 14px 16px;
   overflow-x: auto;
-  font-family: var(--font-mono);
-  font-size: 12.5px;
-  line-height: 1.5;
-}}
-.code-block-wrap pre code {{
   background: transparent;
-  border: none;
+}
+.code-block-wrap code {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.55;
+  color: #f4f4f5;
+  background: transparent;
   padding: 0;
-}}
+  border: none;
+  white-space: pre;
+}
 
-/* Thinking Disclosure Box */
-.thinking-box {{
-  margin: 8px 0 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+/* Thinking accordion */
+.thinking-box {
+  margin-bottom: 12px;
   background: var(--bg-subtle);
-  font-size: 12.5px;
-  color: var(--text-secondary);
-  overflow: hidden;
-}}
-.thinking-box summary {{
-  padding: 8px 12px;
-  cursor: pointer;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+}
+.thinking-box summary {
+  padding: 6px 12px;
+  font-size: 11.5px;
   font-weight: 600;
   color: var(--text-secondary);
+  cursor: pointer;
   user-select: none;
-  outline: none;
-  background: var(--card);
   border-bottom: 1px solid var(--border-light);
-}}
-.thinking-box summary:hover {{
+}
+.thinking-box summary:hover {
   color: var(--text);
-}}
-.thinking-content {{
+}
+.thinking-content {
   padding: 10px 14px;
   white-space: pre-wrap;
   font-family: var(--font-mono);
@@ -952,32 +1407,172 @@ html, body {{
   color: var(--text-muted);
   max-height: 200px;
   overflow-y: auto;
-}}
+}
 
-/* Input bar */
-.chat-bottom {{
-  padding: 14px 20px 22px;
+/* Attachments & input bar */
+.chat-bottom {
+  padding: 12px 20px 20px;
   background: var(--bg);
   border-top: 1px solid var(--border-light);
-}}
-.input-container {{
+  position: relative;
+}
+.attachments-tray {
+  max-width: 820px;
+  margin: 0 auto 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 4px;
+}
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+  max-width: 260px;
+}
+.att-ext-tag {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 1px 4px;
+  border-radius: 3px;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  flex-shrink: 0;
+}
+.attachment-chip .att-img-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.attachment-chip .att-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-chip .att-size {
+  color: var(--text-muted);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.attachment-chip .btn-remove-att {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.attachment-chip .btn-remove-att:hover {
+  color: var(--red);
+}
+.btn-attach {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+  margin-bottom: 1px;
+  user-select: none;
+}
+.btn-attach:hover {
+  background: var(--bg-subtle);
+  color: var(--text);
+}
+.btn-attach svg {
+  width: 17px;
+  height: 17px;
+}
+.drag-drop-overlay {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  background: rgba(247, 246, 242, 0.96);
+  backdrop-filter: blur(4px);
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  z-index: 500;
+  pointer-events: none;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.user-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.user-att-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+.user-att-thumb {
+  max-width: 220px;
+  max-height: 160px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  display: block;
+  margin-top: 6px;
+}
+.input-container {
   max-width: 820px;
   margin: 0 auto;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 10px 14px 10px 18px;
+  padding: 8px 12px 8px 10px;
   box-shadow: 0 2px 6px rgba(0,0,0,0.04);
   display: flex;
   align-items: flex-end;
-  gap: 10px;
+  gap: 8px;
   transition: all 0.15s ease;
-}}
-.input-container:focus-within {{
+  position: relative;
+}
+.input-container:focus-within {
   border-color: var(--accent);
   box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-}}
-#chat-input {{
+}
+#chat-input {
   flex: 1;
   background: transparent;
   border: none;
@@ -989,9 +1584,9 @@ html, body {{
   max-height: 180px;
   min-height: 26px;
   line-height: 1.5;
-  padding: 3px 0;
-}}
-.btn-send {{
+  padding: 4px 0;
+}
+.btn-send {
   width: 32px;
   height: 32px;
   border-radius: 50%;
@@ -1006,24 +1601,25 @@ html, body {{
   font-weight: 700;
   transition: all 0.15s ease;
   flex-shrink: 0;
-}}
-.btn-send:hover {{
+  margin-bottom: 1px;
+}
+.btn-send:hover {
   opacity: 0.9;
   transform: scale(1.04);
-}}
-.btn-send:disabled {{
+}
+.btn-send:disabled {
   background: var(--border);
   color: var(--text-muted);
   cursor: not-allowed;
   transform: none;
-}}
-.input-hint {{
+}
+.input-hint {
   text-align: center;
   font-size: 11px;
   color: var(--text-muted);
   margin-top: 8px;
-}}
-.cursor-blink {{
+}
+.cursor-blink {
   display: inline-block;
   width: 6px;
   height: 14px;
@@ -1031,17 +1627,17 @@ html, body {{
   margin-left: 2px;
   vertical-align: -2px;
   animation: blink 0.9s infinite;
-}}
-@keyframes blink {{
-  0%, 100% {{ opacity: 1; }}
-  50% {{ opacity: 0; }}
-}}
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
 </style></head><body>
-<div class="chat-app">
-  {nav_header('chat')}
+<div class="chat-app" id="chat-app">
+  __NAV_HEADER__
   <div class="chat-topbar">
     <div class="model-pill">
-      <span style="color:var(--accent);font-size:12px">⚡</span>
+      <span class="model-indicator"></span>
       <select id="model-select" class="model-select">
         <optgroup label="Virtual Smart Routing" id="group-virtual">
           <option value="auto">auto (Smart Router)</option>
@@ -1056,56 +1652,84 @@ html, body {{
     <div class="chat-options">
       <label><input type="checkbox" id="opt-stream" checked> Streaming</label>
       <label><input type="checkbox" id="opt-thinking"> Thinking</label>
-      <label>Privacy:
-        <select id="opt-privacy" style="background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:11px;padding:2px 4px">
-          <option value="default">default</option>
-          <option value="strict">strict (no cloud)</option>
-        </select>
-      </label>
-      <button class="btn-icon" id="btn-clear" title="Clear chat (⌘K)">Clear</button>
+      <label title="Strict Privacy: Keep all prompts local and disable cloud routing"><input type="checkbox" id="opt-privacy"> Strict Privacy</label>
+      <button class="btn-icon" id="btn-clear" title="Clear chat (Cmd+K)">Clear</button>
     </div>
   </div>
 
   <div class="chat-messages" id="messages-container">
     <div class="messages-inner" id="messages-list">
       <div class="welcome-hero" id="welcome-hero">
-        <div class="welcome-icon">
-          {LOGO}
+        <div class="welcome-badge-wrap">
+          <div class="welcome-badge-outer">
+            <div class="welcome-badge-inner">
+              <img src="__GLYPH_URI__" width="70" height="70" alt="Waypost Logo">
+            </div>
+          </div>
         </div>
         <h2 class="welcome-title">How can I help you today?</h2>
         <p class="welcome-sub">Waypost routes prompts across local and cloud models, choosing the fastest free engine with automatic escalation.</p>
         <div class="prompt-chips">
-          <div class="prompt-chip" onclick="usePrompt(this.innerText)">Compare Rust vs Go for high-throughput networking services</div>
-          <div class="prompt-chip" onclick="usePrompt(this.innerText)">Write a Python decorator to rate-limit async functions with token buckets</div>
-          <div class="prompt-chip" onclick="usePrompt(this.innerText)">Explain transformer self-attention and KV cache mechanisms simply</div>
-          <div class="prompt-chip" onclick="usePrompt(this.innerText)">How do circuit breakers prevent cascading failures in microservices?</div>
+          <div class="prompt-chip" onclick="usePrompt(this.querySelector('.prompt-chip-text').innerText)">
+            <span class="prompt-chip-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+            </span>
+            <span class="prompt-chip-text">Compare Rust vs Go for high-throughput networking services</span>
+          </div>
+          <div class="prompt-chip" onclick="usePrompt(this.querySelector('.prompt-chip-text').innerText)">
+            <span class="prompt-chip-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/><line x1="14" y1="4" x2="10" y2="20"/></svg>
+            </span>
+            <span class="prompt-chip-text">Write a Python decorator to rate-limit async functions with token buckets</span>
+          </div>
+          <div class="prompt-chip" onclick="usePrompt(this.querySelector('.prompt-chip-text').innerText)">
+            <span class="prompt-chip-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+            </span>
+            <span class="prompt-chip-text">Explain transformer self-attention and KV cache mechanisms simply</span>
+          </div>
+          <div class="prompt-chip" onclick="usePrompt(this.querySelector('.prompt-chip-text').innerText)">
+            <span class="prompt-chip-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
+            </span>
+            <span class="prompt-chip-text">How do circuit breakers prevent cascading failures in microservices?</span>
+          </div>
         </div>
       </div>
     </div>
   </div>
 
-  <div class="chat-bottom">
+  <div class="chat-bottom" id="chat-bottom">
+    <div class="attachments-tray" id="attachments-tray" style="display:none"></div>
     <div class="input-container">
-      <textarea id="chat-input" placeholder="Message Waypost..." rows="1"></textarea>
+      <label for="file-input" class="btn-attach" id="btn-attach" title="Attach files">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.49-8.49a4 4 0 0 1 5.66 5.66l-8.49 8.49a2 2 0 0 1-2.83-2.83l7.78-7.78"/></svg>
+      </label>
+      <input type="file" id="file-input" multiple style="position:absolute;left:-9999px;opacity:0;width:1px;height:1px;">
+      <textarea id="chat-input" placeholder="Message Waypost or drop files..." rows="1"></textarea>
       <button class="btn-send" id="btn-send" title="Send message (Enter)">↑</button>
     </div>
-    <div class="input-hint">Waypost Smart Router · Enter to send · Shift+Enter for new line · ⌘K to clear</div>
+    <div class="input-hint">Waypost Smart Router · Enter to send · Shift+Enter for new line · Drag & drop or click Attach</div>
+  </div>
+  <div id="drag-drop-overlay" class="drag-drop-overlay" style="display:none">
+    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-secondary)"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
+    <span>Drop files here to attach to conversation</span>
   </div>
 </div>
 
 <script>
-window.onerror = function(msg, url, line, col, error) {{
+window.onerror = function(msg, url, line, col, error) {
   const div = document.createElement("div");
   div.style = "position:fixed;top:10px;left:10px;z-index:9999;background:rgba(255,0,0,0.8);color:white;padding:10px;font-family:monospace;border-radius:4px;max-width:80%;word-break:break-all;";
   div.innerText = "Error: " + msg + " at " + line + ":" + col;
   document.body.appendChild(div);
-}};
-window.addEventListener("unhandledrejection", function(e) {{
+};
+window.addEventListener("unhandledrejection", function(e) {
   const div = document.createElement("div");
   div.style = "position:fixed;top:60px;left:10px;z-index:9999;background:rgba(255,0,0,0.8);color:white;padding:10px;font-family:monospace;border-radius:4px;max-width:80%;word-break:break-all;";
   div.innerText = "Unhandled Rejection: " + (e.reason && e.reason.message ? e.reason.message : e.reason);
   document.body.appendChild(div);
-}});
+});
 const messagesList = document.getElementById('messages-list');
 const messagesContainer = document.getElementById('messages-container');
 const chatInput = document.getElementById('chat-input');
@@ -1118,67 +1742,291 @@ const optStream = document.getElementById('opt-stream');
 const optThinking = document.getElementById('opt-thinking');
 const optPrivacy = document.getElementById('opt-privacy');
 const welcomeHero = document.getElementById('welcome-hero');
+const attachmentsTray = document.getElementById('attachments-tray');
+const fileInput = document.getElementById('file-input');
+const btnAttach = document.getElementById('btn-attach');
+const dragDropOverlay = document.getElementById('drag-drop-overlay');
+const chatApp = document.getElementById('chat-app');
 
 let history = [];
+let transcript = [];
+let attachedFiles = [];
 let isGenerating = false;
 let abortController = null;
 
+// The nav tabs are ordinary links, so moving to Dashboard and back reloads
+// the page and drops every JS variable with it. sessionStorage keeps the
+// conversation across that reload and lets go of it when the window closes:
+// a transcript should survive a tab switch, not outlive the session on disk.
+const SESSION_KEY = 'waypost.chat.v1';
+
+function stripImageParts(msg) {
+  if (!msg || !Array.isArray(msg.content)) return msg;
+  const textOnly = msg.content.filter(p => p && p.type === 'text');
+  return { role: msg.role, content: textOnly.map(p => p.text).join(' ') };
+}
+
+function saveSession() {
+  try {
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify({ history, transcript }));
+  } catch (err) {
+    // Base64 images exhaust the quota quickly. Drop the pixels and keep the
+    // words — losing a thumbnail beats losing the conversation.
+    try {
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify({
+        history: history.map(stripImageParts),
+        transcript: transcript.map(t => Object.assign({}, t, {
+          attachments: (t.attachments || []).map(a => Object.assign({}, a, { dataUrl: null }))
+        }))
+      }));
+    } catch (err2) {
+      // Private window, disabled storage, or still too large: carry on
+      // without persistence rather than breaking the chat.
+    }
+  }
+}
+
+function restoreSession() {
+  let saved = null;
+  try {
+    saved = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
+  } catch (err) {
+    saved = null;
+  }
+  if (!saved || !Array.isArray(saved.transcript) || saved.transcript.length === 0) return;
+  history = Array.isArray(saved.history) ? saved.history : [];
+  transcript = saved.transcript;
+  if (welcomeHero && welcomeHero.parentNode) {
+    welcomeHero.parentNode.removeChild(welcomeHero);
+  }
+  for (const item of transcript) {
+    if (item.role === 'user') {
+      appendUserMessage(item.text || '', item.attachments || []);
+    } else {
+      const msg = createAssistantMessage();
+      msg.contentEl.innerHTML = item.text
+        ? renderMarkdown(item.text)
+        : '<span style="color:var(--text-muted)">(Empty response from model)</span>';
+      if (item.router) msg.metaEl.innerHTML = routerPillHtml(item.router);
+    }
+  }
+  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+}
+
+function updateModelIndicator() {
+  const selectedOpt = modelSelect.options[modelSelect.selectedIndex];
+  const optGroup = selectedOpt ? selectedOpt.parentElement : null;
+  const modelVal = modelSelect.value;
+  const ind = document.querySelector('.model-indicator');
+
+  let mode = 'auto';
+  if (modelVal === 'auto' || modelVal.startsWith('Tier')) {
+    mode = 'auto';
+    if (ind) ind.style.background = 'var(--terracotta)';
+  } else if (optGroup && optGroup.id === 'group-cloud') {
+    mode = 'cloud';
+    if (ind) ind.style.background = 'var(--blue)';
+  } else {
+    mode = 'local';
+    if (ind) ind.style.background = 'var(--green)';
+  }
+
+  fetch('/v1/active-model', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: modelVal, mode: mode })
+  }).catch(() => {});
+}
+
+modelSelect.addEventListener('change', updateModelIndicator);
+
 // Populate specific models from /v1/pricing
-fetch('/v1/pricing').then(r => r.json()).then(res => {{
-  if (res && res.models) {{
-    res.models.forEach(m => {{
+fetch('/v1/pricing').then(r => r.json()).then(res => {
+  if (res && res.models) {
+    res.models.forEach(m => {
       const opt = document.createElement('option');
       opt.value = m.id;
       opt.textContent = m.id + (m.free ? ' · free' : '');
-      if (m.is_local) {{
+      if (m.is_local) {
         groupLocal.appendChild(opt);
-      }} else {{
+      } else {
         groupCloud.appendChild(opt);
-      }}
-    }});
-  }}
-}}).catch(() => {{}});
+      }
+    });
+    updateModelIndicator();
+  }
+}).catch(() => {});
 
 // Auto-expand textarea
-chatInput.addEventListener('input', () => {{
+chatInput.addEventListener('input', () => {
   chatInput.style.height = 'auto';
   chatInput.style.height = Math.min(chatInput.scrollHeight, 180) + 'px';
-}});
+});
 
-chatInput.addEventListener('keydown', (e) => {{
-  if (e.key === 'Enter' && !e.shiftKey) {{
+chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     sendMessage();
-  }}
-  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {{
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
     e.preventDefault();
     clearChat();
-  }}
-}});
+  }
+});
 
-btnSend.addEventListener('click', () => {{
-  if (isGenerating) {{
+btnSend.addEventListener('click', () => {
+  if (isGenerating) {
     stopGeneration();
-  }} else {{
+  } else {
     sendMessage();
-  }}
-}});
+  }
+});
 
 btnClear.addEventListener('click', clearChat);
 
-function usePrompt(text) {{
+if (fileInput) {
+  fileInput.addEventListener('change', (e) => {
+    if (e.target.files && e.target.files.length > 0) {
+      addFiles(Array.from(e.target.files));
+      fileInput.value = '';
+    }
+  });
+}
+
+// Drag & drop handlers
+let dragCounter = 0;
+if (chatApp) {
+  ['dragenter', 'dragover'].forEach(eventName => {
+    chatApp.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragCounter++;
+      if (dragDropOverlay) dragDropOverlay.style.display = 'flex';
+    }, false);
+  });
+
+  ['dragleave', 'drop'].forEach(eventName => {
+    chatApp.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragCounter--;
+      if (dragCounter <= 0 && dragDropOverlay) {
+        dragCounter = 0;
+        dragDropOverlay.style.display = 'none';
+      }
+    }, false);
+  });
+
+  chatApp.addEventListener('drop', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter = 0;
+    if (dragDropOverlay) dragDropOverlay.style.display = 'none';
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      addFiles(Array.from(e.dataTransfer.files));
+    }
+  });
+}
+
+// Clipboard paste handler
+window.addEventListener('paste', (e) => {
+  if (e.clipboardData && e.clipboardData.files && e.clipboardData.files.length > 0) {
+    addFiles(Array.from(e.clipboardData.files));
+  }
+});
+
+function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function getFileBadge(name) {
+  const ext = (name.split('.').pop() || '').toUpperCase().slice(0, 4) || 'FILE';
+  return `<span class="att-ext-tag">${escapeHtml(ext)}</span>`;
+}
+
+function addFiles(files) {
+  for (const file of files) {
+    const isImage = file.type.startsWith('image/');
+    const item = {
+      id: 'att_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+      file: file,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      isImage: isImage,
+      dataUrl: null,
+      textContent: null,
+    };
+
+    if (isImage) {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        item.dataUrl = ev.target.result;
+        renderAttachmentsTray();
+      };
+      reader.readAsDataURL(file);
+    } else {
+      if (file.size < 10 * 1024 * 1024) {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          item.textContent = ev.target.result;
+        };
+        reader.readAsText(file);
+      }
+    }
+    attachedFiles.push(item);
+  }
+  renderAttachmentsTray();
+}
+
+window.removeAttachment = function(index) {
+  attachedFiles.splice(index, 1);
+  renderAttachmentsTray();
+};
+
+function renderAttachmentsTray() {
+  if (!attachmentsTray) return;
+  if (attachedFiles.length === 0) {
+    attachmentsTray.style.display = 'none';
+    attachmentsTray.innerHTML = '';
+    return;
+  }
+  attachmentsTray.style.display = 'flex';
+  attachmentsTray.innerHTML = attachedFiles.map((att, idx) => {
+    const icon = (att.isImage && att.dataUrl)
+      ? `<img class="att-img-thumb" src="${att.dataUrl}" alt="">`
+      : getFileBadge(att.name);
+    return `
+      <div class="attachment-chip" title="${escapeHtml(att.name)} (${formatBytes(att.size)})">
+        ${icon}
+        <span class="att-name">${escapeHtml(att.name)}</span>
+        <span class="att-size">${formatBytes(att.size)}</span>
+        <button type="button" class="btn-remove-att" onclick="removeAttachment(${idx})" title="Remove">×</button>
+      </div>
+    `;
+  }).join('');
+}
+
+function usePrompt(text) {
   chatInput.value = text;
   sendMessage();
-}}
+}
 
-function clearChat() {{
+function clearChat() {
   history = [];
+  transcript = [];
+  try { sessionStorage.removeItem(SESSION_KEY); } catch (err) {}
+  attachedFiles = [];
+  renderAttachmentsTray();
   messagesList.innerHTML = '';
   if (welcomeHero) messagesList.appendChild(welcomeHero);
   chatInput.focus();
-}}
+}
 
-function escapeHtml(str) {{
+function escapeHtml(str) {
   if (str === null || str === undefined) return '';
   const s = typeof str === 'string' ? str : String(str);
   return s.replace(/&/g, '&amp;')
@@ -1186,48 +2034,49 @@ function escapeHtml(str) {{
           .replace(/>/g, '&gt;')
           .replace(/"/g, '&quot;')
           .replace(/'/g, '&#039;');
-}}
+}
 
-function extractText(obj) {{
+function extractText(obj) {
   if (!obj) return '';
   if (typeof obj === 'string') return obj;
-  if (Array.isArray(obj)) {{
-    return obj.map(item => {{
+  if (Array.isArray(obj)) {
+    return obj.map(item => {
       if (typeof item === 'string') return item;
       if (item && item.text) return item.text;
       if (item && item.content) return extractText(item.content);
       return '';
-    }}).join('');
-  }}
+    }).join('');
+  }
   if (obj.text) return typeof obj.text === 'string' ? obj.text : extractText(obj.text);
   if (obj.content) return typeof obj.content === 'string' ? obj.content : extractText(obj.content);
+  if (obj.reason) return typeof obj.reason === 'string' ? obj.reason : extractText(obj.reason);
   if (obj.reasoning) return typeof obj.reasoning === 'string' ? obj.reasoning : extractText(obj.reasoning);
   if (obj.reasoning_content) return typeof obj.reasoning_content === 'string' ? obj.reasoning_content : extractText(obj.reasoning_content);
   return '';
-}}
+}
 
 // Lightweight Markdown renderer
-function renderMarkdown(md) {{
+function renderMarkdown(md) {
   if (md === null || md === undefined) return '';
   let str = typeof md === 'string' ? md : String(md);
   if (!str) return '';
 
   const codeBlockCount = (str.match(/```/g) || []).length;
-  if (codeBlockCount % 2 === 1) {{
-    str = str + '\\n```';
-  }}
+  if (codeBlockCount % 2 === 1) {
+    str = str + '\n```';
+  }
 
   // 1. Code blocks
-  let text = str.replace(/```([a-zA-Z0-9_-]*)\\n([\\s\\S]*?)```/g, function(match, lang, code) {{
+  let text = str.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, function(match, lang, code) {
     const l = lang ? lang.trim() : 'text';
-    const escaped = escapeHtml(code.replace(/\\n$/, ''));
+    const escaped = escapeHtml(code.replace(/\n$/, ''));
     return '<div class="code-block-wrap"><div class="code-header"><span>' + l + '</span><button class="btn-copy" onclick="copyCode(this)">Copy</button></div><pre><code>' + escaped + '</code></pre></div>';
-  }});
+  });
 
   // 2. Inline code
-  text = text.replace(/`([^`]+)`/g, function(match, code) {{
+  text = text.replace(/`([^`]+)`/g, function(match, code) {
     return '<code>' + escapeHtml(code) + '</code>';
-  }});
+  });
 
   // 3. Headings
   text = text.replace(/^### (.*$)/gim, '<h3>$1</h3>')
@@ -1235,111 +2084,179 @@ function renderMarkdown(md) {{
              .replace(/^# (.*$)/gim, '<h1>$1</h1>');
 
   // 4. Bold & italic
-  text = text.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>')
-             .replace(/\\*(.*?)\\*/g, '<em>$1</em>');
+  text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+             .replace(/\*(.*?)\*/g, '<em>$1</em>');
 
   // 5. Blockquotes
-  text = text.replace(/^\\> (.*$)/gim, '<blockquote>$1</blockquote>');
+  text = text.replace(/^\> (.*$)/gim, '<blockquote>$1</blockquote>');
 
   // 6. Lists
-  text = text.replace(/^\\s*[-*+] (.*$)/gim, '<li>$1</li>');
-  text = text.replace(/(<li>.*<\\/li>)/s, '<ul>$1</ul>');
+  text = text.replace(/^\s*[-*+] (.*$)/gim, '<li>$1</li>');
+  text = text.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>');
 
   // 7. Paragraphs
-  const paragraphs = text.split(/\\n\\n+/);
-  return paragraphs.map(p => {{
+  const paragraphs = text.split(/\n\n+/);
+  return paragraphs.map(p => {
     p = p.trim();
     if (!p) return '';
-    if (p.startsWith('<div') || p.startsWith('<h') || p.startsWith('<ul') || p.startsWith('<blockquote') || p.startsWith('<details')) {{
+    if (p.startsWith('<div') || p.startsWith('<h') || p.startsWith('<ul') || p.startsWith('<blockquote') || p.startsWith('<details')) {
       return p;
-    }}
-    return '<p>' + p.replace(/\\n/g, '<br>') + '</p>';
-  }}).join('');
-}}
+    }
+    return '<p>' + p.replace(/\n/g, '<br>') + '</p>';
+  }).join('');
+}
 
-function copyCode(btn) {{
+function routerPillHtml(meta) {
+  const prov = meta.provider || '—';
+  const mName = meta.model || '—';
+  const tier = meta.complexity_tier || '—';
+  const lat = meta.latency_ms ? meta.latency_ms + 'ms' : '';
+  const cached = meta.cache === 'hit' ? 'cached' : 'fresh';
+  return `
+        <div class="router-pill">
+          <span class="router-dot"></span>
+          <span><b>Router:</b> ${escapeHtml(prov)} · ${escapeHtml(mName)} · Tier ${escapeHtml(tier)} ${lat ? '· ' + lat : ''} · ${cached}</span>
+        </div>
+      `;
+}
+
+function copyCode(btn) {
   const pre = btn.parentElement.nextElementSibling;
-  if (pre) {{
-    navigator.clipboard.writeText(pre.innerText).then(() => {{
+  if (pre) {
+    navigator.clipboard.writeText(pre.innerText).then(() => {
       const orig = btn.innerText;
       btn.innerText = 'Copied!';
-      setTimeout(() => {{ btn.innerText = orig; }}, 1500);
-    }});
-  }}
-}}
+      setTimeout(() => { btn.innerText = orig; }, 1500);
+    });
+  }
+}
 
-function appendUserMessage(content) {{
-  if (welcomeHero && welcomeHero.parentNode) {{
+function appendUserMessage(content, attachments) {
+  if (welcomeHero && welcomeHero.parentNode) {
     welcomeHero.parentNode.removeChild(welcomeHero);
-  }}
+  }
   const row = document.createElement('div');
   row.className = 'message-row user';
-  row.innerHTML = '<div class="message-bubble">' + escapeHtml(content) + '</div>';
+
+  let attHtml = '';
+  if (attachments && attachments.length > 0) {
+    attHtml += '<div class="user-attachments">';
+    for (const a of attachments) {
+      if (a.isImage && a.dataUrl) {
+        attHtml += `<div><span class="user-att-pill">${getFileBadge(a.name)} ${escapeHtml(a.name)} (${formatBytes(a.size)})</span><img src="${a.dataUrl}" class="user-att-thumb" alt="${escapeHtml(a.name)}"></div>`;
+      } else {
+        attHtml += `<span class="user-att-pill">${getFileBadge(a.name)} ${escapeHtml(a.name)} (${formatBytes(a.size)})</span>`;
+      }
+    }
+    attHtml += '</div>';
+  }
+
+  const textHtml = content ? escapeHtml(content) : '';
+  row.innerHTML = `<div class="message-bubble">${attHtml}${textHtml}</div>`;
   messagesList.appendChild(row);
   messagesContainer.scrollTop = messagesContainer.scrollHeight;
-}}
+}
 
-function createAssistantMessage() {{
+function createAssistantMessage() {
   const row = document.createElement('div');
   row.className = 'message-row assistant';
   row.innerHTML = `
     <div class="assistant-avatar">
-      {LOGO}
+      __AVATAR_MARK__
     </div>
     <div class="message-bubble"><div class="bubble-content"><span class="cursor-blink"></span></div><div class="bubble-meta"></div></div>
   `;
   messagesList.appendChild(row);
   messagesContainer.scrollTop = messagesContainer.scrollHeight;
-  return {{
+  return {
     row: row,
     contentEl: row.querySelector('.bubble-content'),
     metaEl: row.querySelector('.bubble-meta')
-  }};
-}}
+  };
+}
 
-function stopGeneration() {{
-  if (abortController) {{
+function stopGeneration() {
+  if (abortController) {
     abortController.abort();
     abortController = null;
-  }}
+  }
   setGenerating(false);
-}}
+}
 
-function setGenerating(gen) {{
+function setGenerating(gen) {
   isGenerating = gen;
-  if (gen) {{
+  if (gen) {
     btnSend.textContent = '■';
     btnSend.title = 'Stop generating';
-  }} else {{
+  } else {
     btnSend.textContent = '↑';
     btnSend.title = 'Send message';
-  }}
-}}
+  }
+}
 
-async function sendMessage() {{
+async function sendMessage() {
   const text = chatInput.value.trim();
-  if (!text || isGenerating) return;
+  const currentAtts = [...attachedFiles];
+  if ((!text && currentAtts.length === 0) || isGenerating) return;
 
   chatInput.value = '';
   chatInput.style.height = 'auto';
+  attachedFiles = [];
+  renderAttachmentsTray();
 
-  appendUserMessage(text);
-  history.push({{ role: 'user', content: text }});
+  appendUserMessage(text, currentAtts);
+
+  let messageText = text;
+  const fileContextParts = [];
+
+  for (const att of currentAtts) {
+    if (!att.isImage && att.textContent) {
+      const ext = (att.name.split('.').pop() || '').toLowerCase();
+      fileContextParts.push(`[Attached File: ${att.name} (${formatBytes(att.size)})]\n\`\`\`${ext}\n${att.textContent}\n\`\`\``);
+    }
+  }
+
+  if (fileContextParts.length > 0) {
+    messageText = (text ? text + '\n\n' : '') + fileContextParts.join('\n\n');
+  }
+
+  const hasImages = currentAtts.some(a => a.isImage && a.dataUrl);
+  let userPayloadContent = messageText;
+
+  if (hasImages) {
+    const parts = [];
+    if (messageText) {
+      parts.push({ type: 'text', text: messageText });
+    }
+    for (const a of currentAtts) {
+      if (a.isImage && a.dataUrl) {
+        parts.push({
+          type: 'image_url',
+          image_url: { url: a.dataUrl }
+        });
+      }
+    }
+    userPayloadContent = parts;
+  }
+
+  history.push({ role: 'user', content: userPayloadContent });
+  transcript.push({ role: 'user', text: text, attachments: currentAtts });
+  saveSession();
 
   const isStream = optStream ? optStream.checked : true;
   const isThinking = optThinking ? optThinking.checked : false;
   const model = (modelSelect && modelSelect.value) ? modelSelect.value : 'auto';
-  const privacy = (optPrivacy && optPrivacy.value) ? optPrivacy.value : 'default';
+  const privacy = (optPrivacy && optPrivacy.checked) ? 'strict' : 'default';
 
-  const cleanMessages = history.filter(m => m && m.content && String(m.content).trim().length > 0);
+  const cleanMessages = history.filter(m => m && m.content);
 
-  const payload = {{
+  const payload = {
     model: model,
     messages: cleanMessages,
     stream: isStream,
     enable_thinking: isThinking,
     privacy: privacy,
-  }};
+  };
 
   const assistantMsg = createAssistantMessage();
   let fullContent = '';
@@ -1348,114 +2265,117 @@ async function sendMessage() {{
   setGenerating(true);
   abortController = new AbortController();
 
-  try {{
-    const response = await fetch('/v1/chat/completions', {{
+  try {
+    const response = await fetch('/v1/chat/completions', {
       method: 'POST',
-      headers: {{
+      headers: {
         'Content-Type': 'application/json',
         'Accept': isStream ? 'text/event-stream, application/json' : 'application/json'
-      }},
+      },
       body: JSON.stringify(payload),
       signal: abortController.signal
-    }});
+    });
 
-    if (!response.ok) {{
-      const errJson = await response.json().catch(() => ({{}}));
+    if (!response.ok) {
+      const errJson = await response.json().catch(() => ({}));
       const errMsg = (errJson.error && errJson.error.message) ? errJson.error.message : response.statusText;
       assistantMsg.contentEl.innerHTML = '<span style="color:var(--red);background:var(--red-bg);padding:8px 12px;border-radius:6px;display:inline-block">Error: ' + escapeHtml(errMsg) + '</span>';
       setGenerating(false);
       return;
-    }}
+    }
 
-    if (isStream) {{
+    if (isStream) {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
 
-      while (true) {{
-        const {{ value, done }} = await reader.read();
+      while (true) {
+        const { value, done } = await reader.read();
         if (done) break;
-        buffer += decoder.decode(value, {{ stream: true }});
-        const lines = buffer.split('\\n');
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
-        for (const line of lines) {{
+        for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed.startsWith('data:')) continue;
           const dataStr = trimmed.slice(5).trim();
           if (dataStr === '[DONE]') break;
-          try {{
+          try {
             const chunk = JSON.parse(dataStr);
-            if (chunk.error) {{
+            if (chunk.error) {
               const errMsg = typeof chunk.error === 'string' ? chunk.error : (chunk.error.message || JSON.stringify(chunk.error));
               assistantMsg.contentEl.innerHTML = '<span style="color:var(--red);background:var(--red-bg);padding:8px 12px;border-radius:6px;display:inline-block">Error: ' + escapeHtml(errMsg) + '</span>';
               return;
-            }}
-            const c0 = (chunk.choices && chunk.choices[0]) || {{}};
-            const d = c0.delta || {{}};
+            }
+            const c0 = (chunk.choices && chunk.choices[0]) || {};
+            const d = c0.delta || {};
             const delta = extractText(d) || (typeof d.content === 'string' ? d.content : '');
-            if (delta) {{
+            if (delta) {
               fullContent += delta;
               assistantMsg.contentEl.innerHTML = renderMarkdown(fullContent) + '<span class="cursor-blink"></span>';
               messagesContainer.scrollTop = messagesContainer.scrollHeight;
-            }}
-            if (chunk.router) {{
+            }
+            if (chunk.router) {
               routerMeta = chunk.router;
-            }}
-          }} catch (e) {{}}
-        }}
-      }}
-      if (!fullContent) {{
+            }
+          } catch (e) {}
+        }
+      }
+      if (!fullContent) {
         assistantMsg.contentEl.innerHTML = '<span style="color:var(--text-muted)">(Empty response from model)</span>';
-      }} else {{
+      } else {
         assistantMsg.contentEl.innerHTML = renderMarkdown(fullContent);
-      }}
-    }} else {{
+      }
+    } else {
       const data = await response.json();
-      if (data.error) {{
+      if (data.error) {
         const errMsg = typeof data.error === 'string' ? data.error : (data.error.message || JSON.stringify(data.error));
         assistantMsg.contentEl.innerHTML = '<span style="color:var(--red);background:var(--red-bg);padding:8px 12px;border-radius:6px;display:inline-block">Error: ' + escapeHtml(errMsg) + '</span>';
         setGenerating(false);
         return;
-      }}
-      const m0 = (data.choices && data.choices[0] && data.choices[0].message) || {{}};
+      }
+      const m0 = (data.choices && data.choices[0] && data.choices[0].message) || {};
       fullContent = extractText(m0) || (typeof m0.content === 'string' ? m0.content : '');
       routerMeta = data.router;
-      if (!fullContent) {{
+      if (!fullContent) {
         assistantMsg.contentEl.innerHTML = '<span style="color:var(--text-muted)">(Empty response from model)</span>';
-      }} else {{
+      } else {
         assistantMsg.contentEl.innerHTML = renderMarkdown(fullContent);
-      }}
-    }}
+      }
+    }
 
-    if (fullContent && fullContent.trim()) {{
-      history.push({{ role: 'assistant', content: fullContent }});
-    }}
+    if (fullContent && fullContent.trim()) {
+      history.push({ role: 'assistant', content: fullContent });
+    }
 
-    if (routerMeta) {{
-      const prov = routerMeta.provider || '—';
-      const mName = routerMeta.model || '—';
-      const tier = routerMeta.complexity_tier || '—';
-      const lat = routerMeta.latency_ms ? routerMeta.latency_ms + 'ms' : '';
-      const cached = routerMeta.cache === 'hit' ? 'cached' : 'fresh';
-      assistantMsg.metaEl.innerHTML = `
-        <div class="router-pill">
-          <span>⚡ <b>Router:</b> ${{escapeHtml(prov)}} · ${{escapeHtml(mName)}} · Tier ${{escapeHtml(tier)}} ${{lat ? '· ' + lat : ''}} · ${{cached}}</span>
-        </div>
-      `;
-    }}
-  }} catch (err) {{
-    if (err.name !== 'AbortError') {{
+    if (routerMeta) {
+      assistantMsg.metaEl.innerHTML = routerPillHtml(routerMeta);
+    }
+
+    transcript.push({ role: 'assistant', text: fullContent, router: routerMeta || null });
+    saveSession();
+  } catch (err) {
+    if (err.name !== 'AbortError') {
       assistantMsg.contentEl.innerHTML = '<span style="color:var(--red);background:var(--red-bg);padding:8px 12px;border-radius:6px;display:inline-block">Connection error: ' + escapeHtml(err.message) + '</span>';
-    }} else {{
+    } else {
       assistantMsg.contentEl.innerHTML = renderMarkdown(fullContent) + ' <span style="color:var(--text-muted);font-size:12px">(stopped)</span>';
-    }}
-  }} finally {{
+    }
+  } finally {
     setGenerating(false);
     abortController = null;
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
-  }}
-}}
+  }
+}
+
+restoreSession();
 </script>
 </body></html>"""
-
+    return (
+        tmpl.replace("__FAVICON__", FAVICON)
+        .replace("__THEME_CSS__", theme_css())
+        .replace("__NAV_HEADER__", nav_header("chat"))
+        .replace("__AVATAR_MARK__", AVATAR_MARK)
+        .replace("__LOGO_URI__", _LOGO_URI)
+        .replace("__GLYPH_URI__", _GLYPH_URI)
+    )

@@ -77,6 +77,13 @@ class Offering:
     weight: float = 1.0  # manual preference multiplier
     enabled: bool = True
 
+    # A manifest entry says that a local model may exist; it does not prove
+    # that its process is listening right now.  Production manifest entries
+    # start unavailable and discovery flips this only after GET /models
+    # succeeds and returns the configured model.  Directly constructed
+    # offerings keep the True default for tests and embedded users.
+    runtime_available: bool = True
+
     # Provider prefix cache: "auto" — kicks in from ~1024 prefix tokens
     # (OpenAI, DeepSeek), "explicit" — requires block markers (Anthropic
     # cache_control), "none" — none at all.
@@ -153,9 +160,26 @@ class Offering:
         every request is worse than not having the candidate at all."""
         if not self.enabled:
             return False
+        if self.is_local and not self.runtime_available:
+            return False
         if self.is_local or not self.api_key_env:
             return True
         return bool(self.api_key)
+
+
+def is_cloud_ollama_model(model_id: str) -> bool:
+    """Checks if an Ollama model has a 'cloud' prefix (cloud model) or is local."""
+    low = model_id.lower().strip()
+    return (
+        low.startswith("cloud/")
+        or low.startswith("cloud:")
+        or low.startswith("cloud-")
+        or low.startswith("cloud_")
+        or low.startswith("cloud.")
+        or low == "cloud"
+        or "/cloud/" in low
+        or ":cloud/" in low
+    )
 
 
 _CAP_MAP = {c.value: c for c in Capability}
@@ -166,6 +190,22 @@ def _parse_offering(provider: dict, model: dict) -> Offering:
     limits = {**provider.get("limits", {}), **model.get("limits", {})}
     declared = model.get("free", provider.get("free"))
     verdict = pricing.classify(model["id"], declared=declared)
+
+    prov_name = provider.get("name", "").lower()
+    model_id = model["id"]
+    is_local = provider.get("is_local", False)
+
+    # For Ollama / local provider: models with 'cloud' prefix or ollama.com base_url
+    # are cloud models; all other local engine models are local.
+    if prov_name in ("ollama", "local"):
+        if (
+            is_cloud_ollama_model(model_id)
+            or "ollama.com" in provider.get("base_url", "").lower()
+        ):
+            is_local = False
+        else:
+            is_local = True
+
     return Offering(
         provider=provider["name"],
         model_id=model["id"],
@@ -177,7 +217,7 @@ def _parse_offering(provider: dict, model: dict) -> Offering:
         max_output=model.get("max_output", 4096),
         caps=caps,
         trains_on_data=provider.get("trains_on_data", True),
-        is_local=provider.get("is_local", False),
+        is_local=is_local,
         free=verdict.is_free,
         free_source=verdict.source.value,
         free_detail=verdict.detail,
@@ -189,6 +229,7 @@ def _parse_offering(provider: dict, model: dict) -> Offering:
         ttft_p50_ms=model.get("ttft_p50_ms", 1500.0),
         weight=model.get("weight", 1.0),
         enabled=model.get("enabled", True),
+        runtime_available=model.get("runtime_available", not is_local),
         prompt_cache=model.get("prompt_cache", provider.get("prompt_cache", "auto")),
         concurrency=model.get("concurrency", provider.get("concurrency")),
     )
@@ -224,6 +265,33 @@ class Registry:
             return False
         self._offerings[o.key] = o
         return True
+
+    def update_local_runtime(
+        self,
+        provider: str,
+        base_url: str,
+        model_ids: set[str] | None,
+    ) -> int:
+        """Apply a live local-runtime check to matching offerings.
+
+        ``model_ids=None`` means the endpoint itself was unreachable.  An
+        empty set means it answered but did not expose a configured chat
+        model.  Both states must remove the offering from the routing pool.
+        """
+        normalized_url = base_url.rstrip("/")
+        updated = 0
+        for o in self._offerings.values():
+            if (
+                not o.is_local
+                or o.provider != provider
+                or o.base_url.rstrip("/") != normalized_url
+            ):
+                continue
+            available = model_ids is not None and o.model_id in model_ids
+            if o.runtime_available != available:
+                o.runtime_available = available
+                updated += 1
+        return updated
 
     def find_by_model_id(self, model_id: str) -> Offering | None:
         """For an explicit request of a specific model bypassing the

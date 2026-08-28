@@ -365,6 +365,48 @@ class Telemetry:
             for r in rows
         ]
 
+    def latency_percentiles(
+        self,
+        window_s: float = 86_400,
+        local_offerings: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Measured p50/p95, per offering and split local vs cloud.
+
+        A percentile cannot be derived from an average: mean * 1.3 is a
+        guess with a percentile's name on it. Only successful attempts
+        count — a 200 ms connection refusal is not a fast answer.
+        """
+        since = time.time() - window_s
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT offering, latency_ms FROM attempts "
+                "WHERE ts > ? AND ok = 1 AND latency_ms > 0",
+                (since,),
+            ).fetchall()
+
+        per_offering: dict[str, list[float]] = {}
+        local_pool: list[float] = []
+        cloud_pool: list[float] = []
+        local_offerings = local_offerings or set()
+        for off, lat in rows:
+            per_offering.setdefault(off, []).append(float(lat))
+            (local_pool if off in local_offerings else cloud_pool).append(float(lat))
+
+        def pcts(values: list[float]) -> dict[str, int]:
+            if not values:
+                return {"p50": 0, "p95": 0, "n": 0}
+            return {
+                "p50": int(np.percentile(values, 50)),
+                "p95": int(np.percentile(values, 95)),
+                "n": len(values),
+            }
+
+        return {
+            "per_offering": {k: pcts(v) for k, v in per_offering.items()},
+            "local": pcts(local_pool),
+            "cloud": pcts(cloud_pool),
+        }
+
     def savings_stats(self, window_s: float = 30 * 86_400) -> dict:
         """Estimated dollars saved by routing to free tiers vs commercial models."""
         from . import pricing

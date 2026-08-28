@@ -200,6 +200,24 @@ def test_local_always_present_in_plan(db):
     assert any(c.offering.is_local for c in plan)  # end of the ladder
 
 
+def test_explicit_dead_local_model_falls_back_without_calling_it(db):
+    dead_local = offering(
+        "mlx",
+        "qwen",
+        is_local=True,
+        trains_on_data=False,
+        runtime_available=False,
+        quality_score=0.9,
+    )
+    cloud = offering("cloud", "safe", quality_score=0.5)
+    r, _ = _router([dead_local, cloud], db)
+
+    rq = req(model="mlx/qwen")
+    plan = r.plan(rq, classify_l0(rq))
+
+    assert [c.offering.key for c in plan] == ["cloud/safe"]
+
+
 def test_exhausted_quota_removes_candidate(db):
     a = offering("a", "m1", quality_score=0.9)
     a.limit_rpd = 1

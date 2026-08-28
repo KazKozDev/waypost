@@ -21,6 +21,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .registry import Offering
 
@@ -240,4 +241,93 @@ class Ledger:
                 if self._key_counts.get(offering_key, 1) <= 1:
                     label = offering_key
                 out[label] = {name: b.remaining(now) for name, b in buckets.items()}
+            return out
+
+    def detailed_snapshot(self) -> dict[str, dict[str, Any]]:
+        """Detailed quota analytics for UI dashboards: limits, usage, remaining, burn rate, and binding constraints."""
+        with self._lock:
+            now = time.time()
+            out: dict[str, dict[str, Any]] = {}
+            for bk, buckets in self._buckets.items():
+                offering_key, _, idx = bk.rpartition("#")
+                label = (
+                    bk if self._key_counts.get(offering_key, 1) > 1 else offering_key
+                )
+
+                max_used_pct = 0.0
+                binding_limit_str = "—"
+                burn_rate = "0/min"
+                is_blocked = False
+                blocked_s = 0.0
+                rem_summary = ""
+                used_summary = ""
+
+                bucket_stats = {}
+                for name, b in buckets.items():
+                    b._roll(now)
+                    used = b.used
+                    limit = b.limit
+                    rem = max(0, limit - used)
+                    pct = (used / limit * 100.0) if limit > 0 else 0.0
+                    if pct >= max_used_pct:
+                        max_used_pct = pct
+
+                    if now < b.blocked_until:
+                        is_blocked = True
+                        blocked_s = max(blocked_s, b.blocked_until - now)
+
+                    bucket_stats[name] = {
+                        "limit": limit,
+                        "used": used,
+                        "remaining": rem,
+                        "used_pct": round(pct, 1),
+                    }
+
+                # Primary binding limit
+                if "rpm" in buckets:
+                    rpm_b = buckets["rpm"]
+                    rem = max(0, rpm_b.limit - rpm_b.used)
+                    rem_summary = f"{rem:,}/{rpm_b.limit:,} RPM"
+                    used_summary = f"{rpm_b.used:,}/{rpm_b.limit:,} RPM"
+                    burn_rate = f"{rpm_b.used} req/min"
+                    binding_limit_str = f"{rpm_b.limit:,} RPM"
+                elif "tpm" in buckets:
+                    tpm_b = buckets["tpm"]
+                    rem = max(0, tpm_b.limit - tpm_b.used)
+                    rem_summary = f"{rem:,}/{tpm_b.limit:,} TPM"
+                    used_summary = f"{tpm_b.used:,}/{tpm_b.limit:,} TPM"
+                    burn_rate = f"{tpm_b.used} tok/min"
+                    binding_limit_str = f"{tpm_b.limit:,} TPM"
+                elif "rpd" in buckets:
+                    rpd_b = buckets["rpd"]
+                    rem = max(0, rpd_b.limit - rpd_b.used)
+                    rem_summary = f"{rem:,}/{rpd_b.limit:,} RPD"
+                    used_summary = f"{rpd_b.used:,}/{rpd_b.limit:,} RPD"
+                    burn_rate = f"{rpd_b.used} req/day"
+                    binding_limit_str = f"{rpd_b.limit:,} RPD"
+
+                # Exhaustion forecast & status
+                if is_blocked:
+                    exhaustion_eta = f"Rate limited (retry in {int(blocked_s)}s)"
+                elif max_used_pct >= 90:
+                    exhaustion_eta = "Critical limit (>90% used)"
+                elif max_used_pct >= 75:
+                    exhaustion_eta = "Approaching quota limit"
+                elif max_used_pct > 0:
+                    exhaustion_eta = f"Active ({max_used_pct:.0f}% used)"
+                else:
+                    exhaustion_eta = "100% capacity available"
+
+                out[label] = {
+                    "provider": label,
+                    "used_pct": max_used_pct,
+                    "remaining_pct": round(max(0.0, 100.0 - max_used_pct), 1),
+                    "remaining_summary": rem_summary,
+                    "used_summary": used_summary,
+                    "burn_rate": burn_rate,
+                    "binding": binding_limit_str,
+                    "exhaustion_eta": exhaustion_eta,
+                    "is_blocked": is_blocked,
+                    "buckets": bucket_stats,
+                }
             return out

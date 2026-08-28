@@ -34,6 +34,7 @@ class ChatRequest(BaseModel):
     temperature: float = 1.0
     top_p: float | None = None
     max_tokens: int | None = None
+    max_completion_tokens: int | None = None
     stream: bool = False
     stop: list[str] | str | None = None
     tools: list[dict[str, Any]] | None = None
@@ -68,9 +69,12 @@ class ChatRequest(BaseModel):
             "idempotency_key",
             "model",
             "stream",
+            "max_completion_tokens",
         }
         body = self.model_dump(exclude_none=True, exclude=drop)
         body["model"] = model_id
+        if "max_tokens" not in body and self.max_completion_tokens is not None:
+            body["max_tokens"] = self.max_completion_tokens
         return body
 
 

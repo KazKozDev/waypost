@@ -25,7 +25,7 @@ from typing import Any
 
 from . import pricing
 from .providers.openai_compat import OpenAICompatAdapter, ProviderError
-from .registry import Offering, Registry
+from .registry import Offering, Registry, is_cloud_ollama_model
 from .schemas import Capability, Tier
 
 log = logging.getLogger("waypost.discovery")
@@ -56,6 +56,24 @@ LOCAL_DEFAULTS = [
         or "http://127.0.0.1:8081/v1",
     ),
 ]
+
+
+def local_ollama_allowed() -> bool:
+    """Local Ollama stays out of the routing pool by default.
+
+    Ollama keeps one model resident at a time: a plan that mixes several
+    of its models pays a full unload/load cycle on every switch, which
+    costs more than the cloud hop it was meant to save. MLX serves the
+    local tier — it is pinned to a single manifest model.
+
+    WAYPOST_LOCAL_OLLAMA=1 opts back in.
+    """
+    return os.environ.get("WAYPOST_LOCAL_OLLAMA", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def is_free_openrouter(model: dict[str, Any]) -> bool:
@@ -181,25 +199,40 @@ def _is_chat_model(model_id: str) -> bool:
     return True
 
 
-def _offering_from_local(provider_name: str, base_url: str, model_id: str) -> Offering:
+def _offering_from_local(
+    provider_name: str,
+    base_url: str,
+    model_id: str,
+    is_provider_cloud: bool = False,
+) -> Offering:
     tier = _tier(model_id)
     quality = 0.50 if tier is Tier.S else (0.72 if tier is Tier.M else 0.82)
     ttft = 200.0 if tier is Tier.S else (500.0 if tier is Tier.M else 900.0)
+
+    is_local = True
+    if provider_name.lower() in ("ollama", "local"):
+        if (
+            is_cloud_ollama_model(model_id)
+            or "ollama.com" in base_url.lower()
+            or is_provider_cloud
+        ):
+            is_local = False
+
     return Offering(
         provider=provider_name,
         model_id=model_id,
         base_url=base_url,
-        api_key_env=None,
+        api_key_env=None if is_local else "OLLAMA_API_KEY",
         tier=tier,
         ctx_window=32768,
         max_output=4096,
         caps={Capability.STREAM, Capability.JSON, Capability.TOOLS},
         free=True,
         free_source=pricing.Source.MANIFEST.value,
-        free_detail="local model",
+        free_detail="local model" if is_local else "cloud model via ollama",
         trains_on_data=False,
-        is_local=True,
-        concurrency=1,
+        is_local=is_local,
+        concurrency=1 if is_local else None,
         quality_score=quality,
         ttft_p50_ms=ttft,
         weight=1.0,
@@ -261,14 +294,20 @@ async def discover_provider(
     """Polls one provider's /models. Returns a summary."""
     known = {o.model_id for o in registry.all() if o.provider == provider.provider}
     try:
-        remote = await adapter.list_models(provider)
+        remote = await adapter.list_models(
+            provider, timeout=2.0 if provider.is_local else 30.0
+        )
     except ProviderError as exc:
+        if provider.is_local:
+            registry.update_local_runtime(provider.provider, provider.base_url, None)
         return {
             "provider": provider.provider,
             "status": "error",
             "detail": str(exc)[:200],
         }
     except Exception as exc:  # noqa: BLE001
+        if provider.is_local:
+            registry.update_local_runtime(provider.provider, provider.base_url, None)
         return {
             "provider": provider.provider,
             "status": "unsupported",
@@ -278,6 +317,10 @@ async def discover_provider(
     added: list[str] = []
     demoted = _recheck_prices(registry, provider, remote)
 
+    is_remote_cloud_ollama = provider.provider.lower() == "ollama" and (
+        "ollama.com" in provider.base_url.lower() or not provider.is_local
+    )
+
     if provider.is_local or provider.provider in (
         "local",
         "ollama",
@@ -285,6 +328,16 @@ async def discover_provider(
         "llamacpp",
         "mlx",
     ):
+        local_model_ids = {
+            str(m.get("id", ""))
+            for m in remote
+            if m.get("id") and _is_chat_model(str(m.get("id", "")))
+        }
+        if provider.is_local:
+            registry.update_local_runtime(
+                provider.provider, provider.base_url, local_model_ids
+            )
+
         for m in remote:
             mid = m.get("id", "")
             if not mid or not _is_chat_model(mid):
@@ -292,7 +345,19 @@ async def discover_provider(
             # For MLX, avoid auto-registering un-loaded HF cache models if manifest already configured MLX
             if provider.provider == "mlx" and known and mid not in known:
                 continue
-            o = _offering_from_local(provider.provider, provider.base_url, mid)
+
+            if is_remote_cloud_ollama:
+                if not is_cloud_ollama_model(mid):
+                    mid = f"cloud/{mid}"
+                o = _offering_from_local(
+                    provider.provider,
+                    provider.base_url,
+                    mid,
+                    is_provider_cloud=True,
+                )
+            else:
+                o = _offering_from_local(provider.provider, provider.base_url, mid)
+
             if registry.add(o):
                 added.append(o.key)
         return {
@@ -345,6 +410,10 @@ async def discover_local_backends(
             if name not in endpoints:
                 endpoints[name] = (name, url_getter())
 
+    # Deliberate, not accidental: see local_ollama_allowed().
+    if not local_ollama_allowed():
+        endpoints.pop("ollama", None)
+
     results = []
     for name, (prov_name, base_url) in endpoints.items():
         dummy = Offering(
@@ -352,8 +421,9 @@ async def discover_local_backends(
         )
         try:
             res = await discover_provider(adapter, registry, dummy)
-            if res.get("status") == "ok" and (res.get("added") or res.get("known")):
-                results.append(res)
+            # Offline results are useful control-plane state too: omitting
+            # them left the UI showing the last successful discovery forever.
+            results.append(res)
         except Exception as exc:  # noqa: BLE001
             log.debug(
                 "local backend %s (%s) check failed: %s", prov_name, base_url, exc

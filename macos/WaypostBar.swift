@@ -4,7 +4,7 @@ import WebKit
 
 // WaypostBar — a native menu-bar app (like Ollama).
 // Runs the waypost local server from venv as a subprocess and keeps
-// its status in the menu bar: 🟢 running / 🟠 starting / 🔴 failed.
+// its status in the menu bar: running / starting / failed.
 
 // The project path is embedded at build time (see macos/build.sh) via
 // generated/BuildConfig.swift:   let projectDir = "..."
@@ -19,7 +19,7 @@ struct WaypostBarApp: App {
 }
 
 // Controller for opening pages in a dedicated native macOS window.
-final class AppWindowController: NSObject, NSWindowDelegate {
+final class AppWindowController: NSObject, NSWindowDelegate, WKUIDelegate, WKNavigationDelegate {
     static let shared = AppWindowController()
     private var window: NSWindow?
     private var webView: WKWebView?
@@ -36,7 +36,30 @@ final class AppWindowController: NSObject, NSWindowDelegate {
 
         let config = WKWebViewConfiguration()
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        config.applicationNameForUserAgent = "WaypostApp/5.0"
+
+        let script = """
+        (function() {
+            function applyMacApp() {
+                if (document.documentElement) { document.documentElement.classList.add('macos-app'); }
+                if (document.body) { document.body.classList.add('macos-app'); }
+            }
+            applyMacApp();
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', applyMacApp);
+            }
+        })();
+        """
+        let userScript = WKUserScript(
+            source: script,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        )
+        config.userContentController.addUserScript(userScript)
+
         let wv = WKWebView(frame: .zero, configuration: config)
+        wv.uiDelegate = self
+        wv.navigationDelegate = self
         wv.load(req)
         self.webView = wv
 
@@ -50,7 +73,7 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         win.center()
         win.title = title
         win.titlebarAppearsTransparent = true
-        win.titleVisibility = .visible
+        win.titleVisibility = .hidden
         win.isReleasedWhenClosed = false
         win.delegate = self
         win.contentView = wv
@@ -62,6 +85,68 @@ final class AppWindowController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         // Keep controller ready for next show() call
+    }
+
+    // MARK: - WKNavigationDelegate
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        if let url = navigationAction.request.url {
+            let isLocal = (url.host == "127.0.0.1" || url.host == "localhost")
+            if navigationAction.navigationType == .linkActivated && (!isLocal || navigationAction.targetFrame == nil) {
+                NSWorkspace.shared.open(url)
+                decisionHandler(.cancel)
+                return
+            }
+        }
+        decisionHandler(.allow)
+    }
+
+    // MARK: - WKUIDelegate
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        if let url = navigationAction.request.url {
+            NSWorkspace.shared.open(url)
+        }
+        return nil
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runOpenPanelWith parameters: WKOpenPanelParameters,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping ([URL]?) -> Void
+    ) {
+        let openPanel = NSOpenPanel()
+        openPanel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        openPanel.canChooseDirectories = parameters.allowsDirectories
+        openPanel.canChooseFiles = true
+        openPanel.resolvesAliases = true
+        openPanel.title = "Choose Files to Attach"
+        openPanel.prompt = "Attach"
+
+        if let win = self.window {
+            openPanel.beginSheetModal(for: win) { response in
+                if response == .OK {
+                    completionHandler(openPanel.urls)
+                } else {
+                    completionHandler(nil)
+                }
+            }
+        } else {
+            let response = openPanel.runModal()
+            if response == .OK {
+                completionHandler(openPanel.urls)
+            } else {
+                completionHandler(nil)
+            }
+        }
     }
 }
 
@@ -107,9 +192,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let openItem = NSMenuItem(title: "Open Waypost", action: #selector(openWaypost), keyEquivalent: "o")
         openItem.target = self
         menu.addItem(openItem)
+
         menu.addItem(.separator())
 
-        let statusText = st == .running ? "Server: Running"
+        let modeDesc = server.lastMode == "cloud" ? "Cloud" : server.lastMode == "auto" ? "Auto" : "Local"
+        let modelDesc = server.lastModel.isEmpty ? "" : " · \(server.lastModel)"
+        let statusText = st == .running ? "Server: Running (\(modeDesc)\(modelDesc))"
                        : st == .starting ? "Server: Starting…"
                        : st == .stopped ? "Server: Stopped"
                        : "Server: Failed"
@@ -136,13 +224,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateIcon() {
         let st = server.state
+        let mode = server.lastMode
         let symbol = st == .running ? "circle.fill"
                    : st == .starting ? "circle.dashed"
                    : "circle"
-        let color: NSColor = st == .running ? .systemGreen
-                           : st == .starting ? .systemOrange
-                           : st == .failed ? .systemRed
-                           : .systemGray
+
+        let color: NSColor
+        if st == .running {
+            if mode == "local" {
+                color = .systemGreen
+            } else if mode == "cloud" {
+                color = .systemBlue
+            } else {
+                color = .systemOrange // Auto / Smart router
+            }
+        } else if st == .starting {
+            color = .systemOrange
+        } else if st == .failed {
+            color = .systemRed
+        } else {
+            color = .systemGray
+        }
+
         let image = NSImage(
             systemSymbolName: symbol, accessibilityDescription: "waypost")
         image?.withSymbolConfiguration(
@@ -156,7 +259,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // --- actions ---
     @objc func openWaypost() {
         if let url = URL(string: server.chatURL) {
-            AppWindowController.shared.show(url: url, title: "Waypost")
+            AppWindowController.shared.show(url: url, title: "Waypost — Chat")
+        }
+    }
+    @objc func openDashboard() {
+        if let url = URL(string: server.dashboardURL) {
+            AppWindowController.shared.show(url: url, title: "Waypost — Dashboard")
+        }
+    }
+    @objc func openProviders() {
+        if let url = URL(string: server.providersURL) {
+            AppWindowController.shared.show(url: url, title: "Waypost — Providers & Keys")
+        }
+    }
+    @objc func openSetup() {
+        if let url = URL(string: server.setupURL) {
+            AppWindowController.shared.show(url: url, title: "Waypost — Setup")
         }
     }
     @objc func copyBase() {
@@ -190,6 +308,9 @@ final class ServerController {
     var state: State = .stopped { didSet { onStateChange?() } }
     var onStateChange: (() -> Void)?
 
+    var lastMode: String = "auto"
+    var lastModel: String = "auto (Smart Router)"
+
     private var proc: Process?
     private let queue = DispatchQueue(label: "waypost.proc")
 
@@ -199,6 +320,7 @@ final class ServerController {
     var baseURL: String { "http://\(host):\(port)/v1" }
     var chatURL: String { "http://\(host):\(port)/chat" }
     var dashboardURL: String { "http://\(host):\(port)/dashboard" }
+    var providersURL: String { "http://\(host):\(port)/providers" }
     var setupURL: String { "http://\(host):\(port)/setup" }
     var logPath: String { projectDir + "/var/server.log" }
 
@@ -275,11 +397,23 @@ final class ServerController {
         guard state != .stopped else { return }
         let url = URL(string: baseURL.replacingOccurrences(of: "/v1", with: "")
                       + "/health")!
-        let task = URLSession.shared.dataTask(with: url) { [weak self] _, resp, _ in
+        let task = URLSession.shared.dataTask(with: url) { [weak self] data, resp, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
                 let ok = (resp as? HTTPURLResponse)?.statusCode == 200
-                if ok { self.state = .running }
+                if ok {
+                    if let data = data,
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        let mode = json["last_mode"] as? String ?? "local"
+                        let model = json["last_model"] as? String ?? ""
+                        if self.lastMode != mode || self.lastModel != model {
+                            self.lastMode = mode
+                            self.lastModel = model
+                            self.onStateChange?()
+                        }
+                    }
+                    if self.state != .running { self.state = .running }
+                }
                 else if self.state == .running { self.state = .starting }
             }
         }

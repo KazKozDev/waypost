@@ -333,6 +333,11 @@ class Router:
             o = self.registry.find_by_model_id(req.model)
             if o is None:
                 return []
+            # An explicit model name must not resurrect a stale local
+            # manifest entry.  Fall back through the normal plan when its
+            # runtime did not pass the live availability check.
+            if not o.usable:
+                return self._auto_plan(req, p, limit, prefix=prefix)
             # The user's will — but not above the free_only policy: a
             # paid model cannot be called even explicitly, otherwise the
             # rule stops being a rule. Fall through to the auto-plan

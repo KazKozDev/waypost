@@ -54,16 +54,31 @@ class CrossEncoderReranker:
 
         self._model = CrossEncoder(model_name)
         self.name = f"cross-encoder:{model_name}"
+        # sentence-transformers squashes inside predict() itself: a
+        # single-label head gets Sigmoid by default. A second sigmoid on
+        # top folds every score into [0.5, 0.73] — then rerank_threshold
+        # is below the minimum possible score and the verifier confirms
+        # anything at all. Squash only if the backend returns raw logits.
+        activation = getattr(self._model, "activation_fn", None) or getattr(
+            self._model, "default_activation_function", None
+        )
+        self._raw_logits = type(activation).__name__ not in ("Sigmoid", "Softmax")
+
+    def _to_score(self, value: float) -> float:
+        if not self._raw_logits:
+            return value
+        return 1.0 / (1.0 + math.exp(-value))  # sigmoid → 0..1
 
     def score(self, query: str, candidate: str) -> float:
-        logit = float(self._model.predict([[query, candidate]])[0])
-        return 1.0 / (1.0 + math.exp(-logit))  # sigmoid → 0..1
+        return self._to_score(float(self._model.predict([[query, candidate]])[0]))
 
     def rank(self, query: str, docs: list[str], top_n: int) -> list[tuple[int, float]]:
         pairs = [[query, d] for d in docs]
-        logits = self._model.predict(pairs)
         scored = sorted(
-            ((i, 1.0 / (1.0 + math.exp(-float(val)))) for i, val in enumerate(logits)),
+            (
+                (i, self._to_score(float(val)))
+                for i, val in enumerate(self._model.predict(pairs))
+            ),
             key=lambda x: x[1],
             reverse=True,
         )

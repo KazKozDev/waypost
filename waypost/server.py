@@ -18,14 +18,16 @@ from __future__ import annotations
 
 import asyncio
 import base64 as _b64
+import json
 import logging
 import os as _os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     HTMLResponse,
@@ -37,7 +39,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 import uuid
 
-from . import pricing
+from . import pricing, sysmem
 from .bandit import Bandit
 from .batch import BatchQueue, BatchWorker, QuotaExhausted
 from .breaker import CircuitBreaker
@@ -46,7 +48,7 @@ from .classify import classify, classify_l0
 from .compress import Compressor
 from .config import Settings, load_env
 from .control import ControlPlane
-from .discovery import run_discovery
+from .discovery import discover_local_backends, run_discovery
 from .embeddings import EmbeddingService
 from .executor import Executor
 from .guard import Guard
@@ -145,6 +147,10 @@ async def lifespan(app: FastAPI):
     )
     adapter = OpenAICompatAdapter(client)
 
+    # Do not accept traffic with manifest-only local availability.  A local
+    # process must answer /models and expose the configured model first.
+    startup_local_discovery = await discover_local_backends(adapter, registry)
+
     app.state.settings = settings
     app.state.registry = registry
     app.state.ledger = ledger
@@ -218,7 +224,7 @@ async def lifespan(app: FastAPI):
     log.info("embeddings: backend %s (dim=%d)", embeddings.backend, embeddings.dim)
     app.state.embeddings = embeddings
     app.state.reranker = None
-    app.state.discovery = []
+    app.state.discovery = startup_local_discovery
 
     # ------------------------------------------------------ control plane
     control = ControlPlane()
@@ -245,12 +251,16 @@ async def lifespan(app: FastAPI):
         return results
 
     async def job_health():
-        """A cheap job: pull measured reliability into the registry.
-        Makes no network calls — only reads its own telemetry."""
+        """Refresh reliability and live availability of local runtimes."""
         rates = telemetry.success_rates(window_s=86_400)
         for key, rate in rates.items():
             registry.apply_probe(key, success_rate=rate)
-        return {"updated": len(rates), "breakers": breaker.snapshot()}
+        local_results = await discover_local_backends(adapter, registry)
+        return {
+            "updated": len(rates),
+            "breakers": breaker.snapshot(),
+            "local_backends": local_results,
+        }
 
     async def job_purge():
         removed = app.state.idempotency.purge()
@@ -301,11 +311,12 @@ async def lifespan(app: FastAPI):
 
 
 class PathNormalizationMiddleware:
-    """Normalizes whitespace and duplicate slashes in request paths.
+    """Normalizes whitespace and duplicate slashes/prefixes in request paths.
 
     Forgives accidental client URLs like:
       - /v1 /chat/completions -> /v1/chat/completions
       - /v1%20/models -> /v1/models
+      - /v1/v1/chat/completions -> /v1/chat/completions (duplicated /v1)
       - /chat/completions -> /v1/chat/completions (missing /v1 prefix)
       - /models -> /v1/models
     """
@@ -317,6 +328,8 @@ class PathNormalizationMiddleware:
         if scope["type"] in ("http", "websocket"):
             path = scope.get("path", "")
             parts = [p.strip() for p in path.split("/") if p.strip()]
+            while len(parts) >= 2 and parts[0] == "v1" and parts[1] == "v1":
+                parts.pop(0)
             if parts:
                 normalized = "/" + "/".join(parts)
                 if parts[0] in (
@@ -840,9 +853,193 @@ async def _router_error(_: Request, exc: RouterError):
     )
 
 
+@app.post("/v1/active-model")
+async def set_active_model(req: Request):
+    try:
+        body = await req.json()
+        model_val = body.get("model", "auto")
+        mode_val = body.get("mode", "auto")
+        app.state.active_model = model_val
+        app.state.active_mode = mode_val
+        return {
+            "status": "ok",
+            "model": app.state.active_model,
+            "mode": app.state.active_mode,
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
 @app.get("/health")
 async def health():
-    return {"status": "ok", "breakers": app.state.breaker.snapshot()}
+    active_model = getattr(app.state, "active_model", "auto")
+    active_mode = getattr(app.state, "active_mode", "auto")
+
+    last_mode = active_mode
+    last_model = active_model
+
+    if active_model == "auto":
+        last_model = "auto (Smart Router)"
+    elif active_model.startswith("Tier"):
+        last_model = active_model
+
+    recent = []
+    try:
+        recent = app.state.telemetry.attempt_logs(limit=1)
+    except Exception:
+        pass
+
+    if recent and active_model in (
+        "auto",
+        "auto (Smart Router)",
+        "Tier S",
+        "Tier M",
+        "Tier L",
+    ):
+        r = recent[0]
+        model_name = r.get("model") or r.get("backend") or ""
+        prov = r.get("provider") or r.get("backend") or ""
+        is_loc = (
+            prov.lower() in ("mlx", "local", "lmstudio", "llamacpp")
+            or "mlx" in model_name.lower()
+            or (prov.lower() == "ollama" and not model_name.lower().startswith("cloud"))
+        )
+        last_mode = "local" if is_loc else "cloud"
+        if model_name:
+            last_model = f"auto ({model_name})"
+
+    return {
+        "status": "ok",
+        "last_mode": last_mode,
+        "last_model": last_model,
+        "breakers": app.state.breaker.snapshot(),
+    }
+
+
+def _get_providers_data(registry: Registry) -> dict[str, Any]:
+    from . import keys
+
+    all_offerings = registry.all()
+    prov_list = []
+    configured_keys = 0
+
+    for p in keys.PROVIDER_DEFS:
+        p_id = p["id"]
+        env_var = p["env_var"]
+        alt_vars = p.get("alt_env_vars", [])
+        active_key = keys.get_active_key(env_var, alt_vars)
+        has_key = bool(active_key)
+        if has_key:
+            configured_keys += 1
+
+        prov_offerings = [
+            o
+            for o in all_offerings
+            if o.provider.lower() == p_id.lower()
+            or (p_id == "gemini" and o.provider.lower() in ("gemini", "google"))
+            or (p_id == "github" and o.provider.lower() in ("github", "azure"))
+        ]
+        usable_offerings = [o for o in prov_offerings if o.usable]
+
+        prov_list.append(
+            {
+                "id": p_id,
+                "name": p["name"],
+                "env_var": env_var,
+                "alt_env_vars": alt_vars,
+                "base_url": p["base_url"],
+                "description": p["description"],
+                "doc_url": p["doc_url"],
+                "has_key": has_key,
+                "masked_key": keys.mask_key(active_key),
+                "models_count": len(prov_offerings),
+                "usable_models_count": len(usable_offerings),
+            }
+        )
+
+    usable_cloud_models = sum(1 for o in all_offerings if not o.is_local and o.usable)
+
+    return {
+        "summary": {
+            "total_providers": len(keys.PROVIDER_DEFS),
+            "configured_keys": configured_keys,
+            "usable_cloud_models": usable_cloud_models,
+        },
+        "providers": prov_list,
+    }
+
+
+@app.get("/providers", response_class=HTMLResponse)
+async def providers_page():
+    from .ui import render_providers_html
+
+    data = _get_providers_data(app.state.registry)
+    return HTMLResponse(render_providers_html(data))
+
+
+@app.get("/v1/providers/keys")
+async def list_provider_keys():
+    data = _get_providers_data(app.state.registry)
+    return data
+
+
+@app.post("/v1/providers/keys")
+async def save_provider_key(payload: dict = Body(...)):
+    from . import keys
+
+    env_var = payload.get("env_var", "").strip()
+    api_key = payload.get("api_key", "").strip()
+    prov_id = payload.get("provider", "").strip()
+
+    if not env_var:
+        raise HTTPException(status_code=400, detail="env_var is required")
+
+    if not api_key:
+        # An empty field means "leave it alone". It used to mean "delete",
+        # and the UI clears the input after every save — so one extra click
+        # on Save silently destroyed the key. Deletion has its own verb.
+        raise HTTPException(
+            status_code=400,
+            detail=f"No key provided for {env_var}. "
+            "To remove it, use the Remove action (DELETE /v1/providers/keys).",
+        )
+
+    in_keychain = keys.save_key(env_var, api_key)
+
+    # Calculate new usable models count for response
+    prov_offerings = [
+        o
+        for o in app.state.registry.all()
+        if o.provider.lower() == prov_id.lower()
+        or (prov_id == "gemini" and o.provider.lower() in ("gemini", "google"))
+        or (prov_id == "github" and o.provider.lower() in ("github", "azure"))
+    ]
+    usable_count = sum(1 for o in prov_offerings if o.usable)
+
+    return {
+        "status": "ok",
+        "message": f"API key for {env_var} saved to .env"
+        + (" and Keychain" if in_keychain else " (Keychain unavailable)"),
+        "masked_key": keys.mask_key(api_key),
+        "usable_count": usable_count,
+    }
+
+
+@app.delete("/v1/providers/keys")
+async def delete_provider_key(payload: dict = Body(...)):
+    from . import keys
+
+    env_var = payload.get("env_var", "").strip()
+    if not env_var:
+        raise HTTPException(status_code=400, detail="env_var is required")
+
+    keys.delete_key(env_var)
+
+    return {
+        "status": "ok",
+        "message": f"API key for {env_var} removed from .env, "
+        "the Keychain and the running process",
+    }
 
 
 def _get_local_backends(registry: Registry) -> list[dict]:
@@ -859,9 +1056,7 @@ def _get_local_backends(registry: Registry) -> list[dict]:
                 "name": name,
                 "url": url,
                 "models_count": len(prov_models),
-                "status": "online"
-                if active
-                else ("configured" if prov_models else "offline"),
+                "status": "online" if active else "offline",
                 "models": [o.model_id for o in prov_models],
             }
         )
@@ -910,6 +1105,14 @@ async def list_models(request: Request):
             "free_source": pricing.Source.UNKNOWN.value,
             "free_detail": "router picks the offering",
             "keys": sum(o.key_count for o in offerings),
+            "caps": ["tools", "json", "vision", "stream", "chat"],
+            "capabilities": {
+                "tools": True,
+                "function_calling": True,
+                "vision": True,
+                "streaming": True,
+            },
+            "supports_tools": True,
         }
     ]
     if "text/html" in request.headers.get("accept", ""):
@@ -1053,29 +1256,64 @@ a { color: var(--text); text-decoration: none; }
 a:hover { opacity: 0.8; }
 
 .claude-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
-  padding: 10px 24px;
+  padding: 8px 24px;
   background: var(--card);
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 100;
 }
-.brand {
+.macos-app .claude-header,
+html.macos-app .claude-header,
+body.macos-app .claude-header {
+  padding-left: 20px;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+.macos-app .claude-header .header-left {
+  width: 72px;
+}
+.claude-header .header-left {
   display: flex;
   align-items: center;
-  gap: 8px;
+  grid-column: 1;
+}
+.claude-header .brand-center,
+.claude-header .brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-decoration: none;
   color: var(--text);
+  grid-column: 2;
 }
-.brand-name {
+.brand-name, .brand-title {
   font-family: var(--font-sans);
   font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
+  font-weight: 700;
+  letter-spacing: -0.01em;
   color: var(--text);
+}
+.claude-header .nav-tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--bg-subtle);
+  padding: 3px;
+  border-radius: var(--radius-sm);
+  justify-self: end;
+  grid-column: 3;
+}
+.macos-app .claude-header .brand,
+.macos-app .claude-header .brand-center,
+.macos-app .claude-header .nav-tabs,
+.macos-app .claude-header a,
+.macos-app .claude-header button,
+.macos-app .claude-header input,
+.macos-app .claude-header select {
+  -webkit-app-region: no-drag;
 }
 .brand-badge {
   font-family: var(--font-mono);
@@ -1256,14 +1494,14 @@ table.claude-table tr:hover td { background: var(--card-hover); }
 
 def _nav_header(active: str = "chat") -> str:
     return f"""<header class="claude-header">
-  <a href="/chat" class="brand">
-    {_LOGO}
+  <div class="header-left"></div>
+  <a href="/chat" class="brand-center brand">
     <span class="brand-name">Waypost</span>
-    <span class="brand-badge">Router</span>
   </a>
   <nav class="nav-tabs">
     <a href="/chat" class="nav-tab {'active' if active == 'chat' else ''}">Chat</a>
     <a href="/dashboard" class="nav-tab {'active' if active == 'dashboard' else ''}">Dashboard</a>
+    <a href="/providers" class="nav-tab {'active' if active == 'providers' else ''}">Providers</a>
     <a href="/setup" class="nav-tab {'active' if active == 'setup' else ''}">Setup</a>
   </nav>
 </header>"""
@@ -1625,7 +1863,7 @@ def _probe_html(data: dict) -> str:
       <h1 class="page-title">Health & Probes</h1>
       <p class="page-sub" style="margin-bottom:0">Active availability probes, TTFT latency & circuit breakers · <code>curl http://127.0.0.1:8080/v1/probe</code></p>
     </div>
-    <a style="background:var(--accent);color:var(--accent-fg);padding:7px 14px;border-radius:var(--radius-sm);font-size:12px;font-weight:600;text-decoration:none;display:inline-block" href="/v1/probe?refresh=true{'&tier=' + active_tier if active_tier != 'ALL' else ''}">⚡ Run Live Probe</a>
+    <a style="background:var(--accent);color:var(--accent-fg);padding:7px 14px;border-radius:var(--radius-sm);font-size:12px;font-weight:600;text-decoration:none;display:inline-block" href="/v1/probe?refresh=true{'&tier=' + active_tier if active_tier != 'ALL' else ''}">Run Live Probe</a>
   </div>
 
   <div class="summary-grid" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">{tier_cards_html}</div>
@@ -1970,9 +2208,7 @@ async def local_models_endpoint(request: Request, refresh: bool = False):
                 "name": name,
                 "url": url,
                 "models_count": len(prov_models),
-                "status": "online"
-                if active
-                else ("configured" if prov_models else "offline"),
+                "status": "online" if active else "offline",
                 "models": [o.model_id for o in prov_models],
             }
         )
@@ -2451,7 +2687,7 @@ html, body {
   __NAV_HEADER__
   <div class="chat-topbar">
     <div class="model-pill">
-      <span style="color:var(--accent);font-size:12px">⚡</span>
+      <span class="model-indicator"></span>
       <select id="model-select" class="model-select">
         <option value="auto">auto (Smart Router)</option>
         <option value="Tier S">Tier S · Fast</option>
@@ -2826,7 +3062,7 @@ async function sendMessage() {
       const cached = routerMeta.cache === 'hit' ? 'cached' : 'fresh';
       assistantMsg.metaEl.innerHTML = `
         <div class="router-pill">
-          <span>⚡ <b>Router:</b> ${escapeHtml(prov)} · ${escapeHtml(mName)} · Tier ${escapeHtml(tier)} ${lat ? '· ' + lat : ''} · ${cached}</span>
+          <span><b>Router:</b> ${escapeHtml(prov)} · ${escapeHtml(mName)} · Tier ${escapeHtml(tier)} ${lat ? '· ' + lat : ''} · ${cached}</span>
         </div>
       `;
     }
@@ -2879,27 +3115,86 @@ async def dashboard_page(request: Request):
         )
 
     quotas = []
-    for p_name, snap in stats_data.get("quota", {}).items():
-        used_pct = snap.get("used_pct", 0)
-        quotas.append(
-            {
-                "provider": p_name,
-                "used_pct": used_pct,
-                "burn_rate": f"{snap.get('rpm_used', 0)}/min",
-                "binding": "requests" if snap.get("rpm_limit") else "tokens",
-                "exhaustion_eta": "will last until reset"
-                if used_pct < 85
-                else "approaching limit",
-            }
-        )
+    if hasattr(app.state.ledger, "detailed_snapshot"):
+        detailed_quotas = app.state.ledger.detailed_snapshot()
+        for p_name, snap in detailed_quotas.items():
+            quotas.append(snap)
+    else:
+        for p_name, snap in stats_data.get("quota", {}).items():
+            quotas.append(
+                {
+                    "provider": p_name,
+                    "used_pct": 0,
+                    "remaining_pct": 100,
+                    "remaining_summary": "Active",
+                    "used_summary": "0 used",
+                    "burn_rate": "0/min",
+                    "binding": "limits active",
+                    "exhaustion_eta": "100% capacity available",
+                }
+            )
 
     cascade = stats_data.get("cascade", {})
     last_24h_list = stats_data.get("last_24h", [])
+    lat_pcts = app.state.telemetry.latency_percentiles(
+        local_offerings={o.key for o in app.state.registry.all() if o.is_local}
+    )
     total_reqs = (
         sum(item.get("attempts", 0) for item in last_24h_list)
         if isinstance(last_24h_list, list)
         else 0
     )
+
+    top_models = []
+    if last_24h_list and isinstance(last_24h_list, list):
+        sorted_24h = sorted(
+            last_24h_list, key=lambda x: x.get("attempts", 0), reverse=True
+        )
+        for item in sorted_24h[:5]:
+            off = item.get("offering", "")
+            att = item.get("attempts", 0)
+            succ = item.get("success_rate", 1.0) * 100
+            tok = item.get("tokens", 0)
+            backend = (
+                "mlx" if "mlx" in off else ("ollama" if "local" in off else "cloud")
+            )
+            top_models.append(
+                {
+                    "model": off,
+                    "backend": backend,
+                    "thinking_supported": "qwen" in off.lower()
+                    or "reason" in off.lower(),
+                    "primary_calls": att,
+                    "escalation_calls": 0,
+                    "success_rate_pct": succ,
+                    # Measured, not the average scaled by a made-up factor.
+                    "p50_ms": lat_pcts["per_offering"].get(off, {}).get("p50", 0),
+                    "p95_ms": lat_pcts["per_offering"].get(off, {}).get("p95", 0),
+                    "total_tokens": tok,
+                }
+            )
+
+    if not top_models:
+        for o in app.state.registry.all()[:5]:
+            backend = (
+                "mlx" if "mlx" in o.key else ("ollama" if o.is_local else o.provider)
+            )
+            top_models.append(
+                {
+                    "model": o.key,
+                    "backend": backend,
+                    "thinking_supported": bool(getattr(o, "supports_thinking", False)),
+                    "primary_calls": 0,
+                    "escalation_calls": 0,
+                    # Nothing was measured for this offering yet: show the
+                    # manifest's declared TTFT, and zero where there is no
+                    # basis for a p95 at all.
+                    "success_rate_pct": 0.0,
+                    "p50_ms": int(o.ttft_p50_ms or 0),
+                    "p95_ms": 0,
+                    "total_tokens": 0,
+                }
+            )
 
     dash_payload = {
         "summary": {
@@ -2927,120 +3222,150 @@ async def dashboard_page(request: Request):
         },
         "quotas": quotas,
         "latencies": {
-            "local_p50": 600,
-            "local_p95": 900,
-            "cloud_p50": 350,
-            "cloud_p95": 750,
+            "local_p50": lat_pcts["local"]["p50"],
+            "local_p95": lat_pcts["local"]["p95"],
+            "local_n": lat_pcts["local"]["n"],
+            "cloud_p50": lat_pcts["cloud"]["p50"],
+            "cloud_p95": lat_pcts["cloud"]["p95"],
+            "cloud_n": lat_pcts["cloud"]["n"],
         },
         "escalations": cascade.get("reasons", {}),
-        "top_models": [
-            {
-                "model": "mlx/Qwen3.8-27B-4bit",
-                "backend": "mlx",
-                "thinking_supported": True,
-                "primary_calls": 42,
-                "escalation_calls": 2,
-                "success_rate_pct": 98.0,
-                "p50_ms": 550,
-                "p95_ms": 850,
-                "total_tokens": 14500,
-            },
-            {
-                "model": "local/qwen3:4b-instruct",
-                "backend": "ollama",
-                "thinking_supported": False,
-                "primary_calls": 85,
-                "escalation_calls": 4,
-                "success_rate_pct": 95.0,
-                "p50_ms": 250,
-                "p95_ms": 400,
-                "total_tokens": 18200,
-            },
-        ],
+        "top_models": top_models,
         "recent_traces": traces,
         "outcome_coverage": cov,
     }
     return HTMLResponse(render_dashboard_html(dash_payload))
 
 
+def _beta_metric() -> dict[str, Any]:
+    """Read the last real measurement written by scripts/measure_beta.py.
+
+    Hardcoding this panel stated the opposite of what the measurement
+    concluded — the page said "ensemble deferred" while the file on disk
+    said the ceiling is worth chasing.
+    """
+    path = Path(settings.beta_path)
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {
+            "p_best": 0.0,
+            "beta": 0.0,
+            "verdict": f"not measured — run scripts/measure_beta.py ({path})",
+        }
+    return {
+        "p_best": float(data.get("p_best", 0.0)),
+        "beta": float(data.get("beta", 0.0)),
+        "verdict": str(data.get("verdict", "no verdict recorded")),
+    }
+
+
+def _keys_health(registry: Registry) -> list[dict[str, Any]]:
+    """One row per provider, counted off the live registry. Hardcoding
+    these numbers hid a dead backend behind a green badge."""
+    rows: dict[str, dict[str, Any]] = {}
+    for o in sorted(registry.all(), key=lambda x: (x.provider, x.model_id)):
+        row = rows.get(o.provider)
+        if row is None:
+            if o.is_local:
+                status, badge = "local (no key needed)", "badge-pass"
+            elif not o.api_key_env:
+                status, badge = "no auth", "badge-pass"
+            elif o.api_key:
+                keys = o.key_count
+                status = f"valid ({keys} key{'s' if keys > 1 else ''})"
+                badge = "badge-pass"
+            else:
+                status, badge = f"missing {o.api_key_env}", "badge-warn"
+            row = rows[o.provider] = {
+                "provider": o.provider,
+                "base_url": o.base_url,
+                "key_status": status,
+                "key_badge": badge,
+                "model_count": 0,
+            }
+        if o.usable:
+            row["model_count"] += 1
+    return list(rows.values())
+
+
 @app.get("/setup")
 async def setup_page(request: Request):
     """Setup & configuration interface."""
     cov_data = app.state.telemetry.outcome_coverage()
+    registry: Registry = app.state.registry
+    hedge = app.state.telemetry.hedge_stats()
+    ex = app.state.executor.snapshot()
+    cascade_stats = app.state.telemetry.cascade_stats()
+    local_offerings = [o for o in registry.all() if o.is_local]
     setup_payload = {
         "subsystems": [
             {
                 "name": "Embeddings & Vector Cache",
                 "status": "on" if app.state.embeddings else "not loaded",
-                "effect": "powers semantic cache & L1 classifier",
+                "effect": f"{settings.embed_model} — semantic cache"
+                + (" & L1 classifier" if settings.enable_l1_classifier else ""),
             },
             {
-                "name": "Semantic Cache (0.95 threshold)",
+                "name": f"Semantic Cache ({settings.semantic_threshold:g} threshold)",
                 "status": "on" if settings.enable_semantic_cache else "off",
-                "effect": f"hit rate {app.state.semantic.hit_rate() * 100:.1f}%",
+                "effect": f"hit rate {app.state.semantic.hit_rate() * 100:.1f}%"
+                + (
+                    f", cross-encoder verifier ≥{settings.rerank_threshold:g}"
+                    if settings.enable_semantic_rerank
+                    else ", no cross-encoder verifier"
+                ),
             },
             {
                 "name": "Exact Cache",
                 "status": "on",
-                "effect": f"hit rate {app.state.cache.hit_rate() * 100:.1f}%",
+                "effect": f"hit rate {app.state.cache.hit_rate() * 100:.1f}%, "
+                f"TTL {settings.cache_ttl_s // 3600}h",
             },
             {
                 "name": "Hedge Requests",
-                "status": "on",
-                "effect": "parallel backup execution when primary is slow",
+                "status": "on" if settings.enable_hedging else "off",
+                "effect": f"budget {settings.hedge_budget * 100:.0f}% of requests; "
+                f"fired {ex.get('hedges', 0)} this session, "
+                f"won {hedge.get('hedged', 0)}/{hedge.get('attempts', 0)} in 24h",
             },
             {
-                "name": "Local-First Draft + Thinking Escalation",
-                "status": "on",
-                "effect": "routes to MLX / Ollama before escalating",
+                "name": "Cloud-First Ladder + Thinking Escalation",
+                "status": "on" if settings.enable_verifier else "escalation off",
+                "effect": "cloud first, local tail fallback "
+                f"({len(local_offerings)} local model(s)); privacy_only forces local. "
+                f"Escalations {cascade_stats.get('escalations', 0)}/"
+                f"{cascade_stats.get('answers', 0)}",
             },
         ],
         "engines": [
             {
-                "name": "MLX LM Server (Primary Local)",
-                "model": "Qwen3.8-27B-4bit",
-                "mem_used_gb": 16.5,
-                "mem_limit_gb": 22.0,
-                "warmup_status": "ready (port 8081)",
-            },
+                "name": f"{o.provider} ({o.base_url})",
+                "model": o.model_id,
+                "mem_used_gb": sysmem.engine_footprint_gb(o.base_url),
+                "mem_limit_gb": sysmem.total_ram_gb(),
+                "warmup_status": ("usable" if o.usable else "disabled")
+                + f" · tier {o.tier.value} · ctx {o.ctx_window:,}"
+                + (f" · concurrency {o.concurrency}" if o.concurrency else ""),
+            }
+            for o in local_offerings
+        ]
+        or [
             {
-                "name": "Ollama (Small Local)",
-                "model": "qwen3:4b-instruct",
-                "mem_used_gb": 3.2,
-                "mem_limit_gb": 6.0,
-                "warmup_status": "ready (port 11434)",
-            },
+                "name": "no local engines registered",
+                "model": "—",
+                "mem_used_gb": None,
+                "mem_limit_gb": None,
+                "warmup_status": "start MLX on :8081 and re-run discovery",
+            }
         ],
-        "keys_health": [
-            {
-                "provider": "openrouter",
-                "base_url": "https://openrouter.ai/api/v1",
-                "key_status": "valid"
-                if _os.environ.get("OPENROUTER_API_KEY")
-                else "missing",
-                "key_badge": "badge-pass"
-                if _os.environ.get("OPENROUTER_API_KEY")
-                else "badge-warn",
-                "model_count": 15,
-            },
-            {
-                "provider": "mlx",
-                "base_url": "http://127.0.0.1:8081/v1",
-                "key_status": "local (no key needed)",
-                "key_badge": "badge-pass",
-                "model_count": 1,
-            },
-        ],
+        "keys_health": _keys_health(registry),
         "data_health": {
             "outcome_coverage": cov_data.get("outcome_coverage", 1.0),
             "attempt_log_count": cov_data.get("total_attempts", 0),
             "exploration_rate_pct": settings.explore_rate * 100,
         },
-        "beta_metric": {
-            "p_best": 0.88,
-            "beta": 0.04,
-            "verdict": "Single best model sufficient; ensemble deferred.",
-        },
+        "beta_metric": _beta_metric(),
         "pricing": {
             "saved_usd": app.state.telemetry.savings_stats().get("saved_usd", 0.0),
             "total_tokens": app.state.telemetry.savings_stats().get("total_tokens", 0),
@@ -3104,10 +3429,31 @@ async def chat_completions(req: ChatRequest, request: Request):
             req, profile, quality_floor=decision.quality_floor, prefix=prefix_hash(req)
         )
 
+        # Starlette sends the HTTP status and headers before it starts
+        # iterating StreamingResponse.  Pull one upstream chunk here so a
+        # dead provider can still fall through the executor ladder, and a
+        # total failure is returned as an honest JSON 502 instead of a 200
+        # followed by an incomplete chunked body.
+        upstream = app.state.executor.stream(req, profile, plan, meta).__aiter__()
+        try:
+            first_chunk = await upstream.__anext__()
+        except StopAsyncIteration:
+            first_chunk = b""
+
         async def gen():
-            async for chunk in app.state.executor.stream(req, profile, plan, meta):
-                yield chunk
-            yield b"data: [DONE]\n\n"
+            last_chunk = first_chunk
+            try:
+                if first_chunk:
+                    yield first_chunk
+                async for chunk in upstream:
+                    last_chunk = chunk
+                    yield chunk
+                if not last_chunk.strip().endswith(b"[DONE]"):
+                    yield b"data: [DONE]\n\n"
+            finally:
+                aclose = getattr(upstream, "aclose", None)
+                if aclose is not None:
+                    await aclose()
 
         app.state.metrics.inc("waypost_requests_total", status="stream")
         return StreamingResponse(gen(), media_type="text/event-stream")

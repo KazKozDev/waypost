@@ -302,69 +302,69 @@ providers:
         ttft_p50_ms: 1100
 
   # -------------------------------------------------------------- Ollama
-  # Cloud Ollama hosting (ollama.com). An OpenAI-compatible endpoint
-  # /v1. Paid: free=false, so the free_only filter does not spend money.
+  # Cloud Ollama hosting (ollama.com). Free tier / quotas available.
+  # Models with 'cloud/' prefix are cloud models; all other models are local.
   - name: ollama
     base_url: https://ollama.com/v1
     api_key_env: OLLAMA_API_KEY
     trains_on_data: false
-    free: false
+    free: true
     models:
-      - id: gpt-oss:120b
+      - id: cloud/gpt-oss:120b
         tier: L
         ctx_window: 131072
         caps: [tools, json, stream]
         quality_score: 0.82
         ttft_p50_ms: 1900
-      - id: qwen3.5:397b
+      - id: cloud/qwen3.5:397b
         tier: L
         ctx_window: 131072
         caps: [tools, json, stream]
         quality_score: 0.85
         ttft_p50_ms: 2000
-      - id: gemma4:31b
+      - id: cloud/gemma4:31b
         tier: M
         ctx_window: 262144
         caps: [tools, json, vision, stream]
         quality_score: 0.80
         ttft_p50_ms: 1500
-      - id: glm-5.2
+      - id: cloud/glm-5.2
         tier: L
         ctx_window: 256000
         caps: [tools, json, stream]
         quality_score: 0.85
         ttft_p50_ms: 2300
-      - id: minimax-m3
+      - id: cloud/minimax-m3
         tier: L
         ctx_window: 1048576
         caps: [tools, json, vision, stream]
         quality_score: 0.84
         ttft_p50_ms: 2600
-      - id: kimi-k3
+      - id: cloud/kimi-k3
         tier: L
         ctx_window: 131072
         caps: [tools, json, stream]
         quality_score: 0.84
         ttft_p50_ms: 2000
-      - id: deepseek-v4-flash:0731
+      - id: cloud/deepseek-v4-flash:0731
         tier: L
         ctx_window: 131072
         caps: [tools, json, stream]
         quality_score: 0.82
         ttft_p50_ms: 1800
-      - id: mistral-large-3:675b
+      - id: cloud/mistral-large-3:675b
         tier: L
         ctx_window: 256000
         caps: [tools, json, stream]
         quality_score: 0.84
         ttft_p50_ms: 2000
-      - id: gpt-oss:20b
+      - id: cloud/gpt-oss:20b
         tier: M
         ctx_window: 131072
         caps: [tools, json, stream]
         quality_score: 0.70
         ttft_p50_ms: 1200
-      - id: nemotron-3-nano:30b
+      - id: cloud/nemotron-3-nano:30b
         tier: M
         ctx_window: 131072
         caps: [tools, json, stream]

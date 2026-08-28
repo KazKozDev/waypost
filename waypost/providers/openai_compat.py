@@ -11,7 +11,6 @@ classification, fallback turns into guesswork.
 from __future__ import annotations
 
 import json
-import uuid
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, AsyncIterator
@@ -159,65 +158,15 @@ class OpenAICompatAdapter:
         first byte are raised as ordinary ones — they can still be
         survived.
         """
-        # Buffer local tools to fake streaming for Open WebUI, because its parser 
-        # breaks on MLX/Ollama outputting full tool_calls in a single chunk.
-        if o.is_local and (req.tools or req.functions):
-            try:
-                resp = await self.complete(
-                    o, req, timeout, api_key=api_key, idempotency_key=idempotency_key
-                )
-            except ProviderError:
-                raise
-
-            model = resp.get("model", o.model_id)
-            id_ = resp.get("id") or f"chatcmpl-{uuid.uuid4().hex[:16]}"
-
-            yield sse_event({
-                "id": id_,
-                "object": "chat.completion.chunk",
-                "model": model,
-                "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]
-            })
-
-            choices = resp.get("choices", [])
-            if choices:
-                choice = choices[0]
-                message = choice.get("message", {})
-                finish_reason = choice.get("finish_reason")
-
-                if "tool_calls" in message:
-                    yield sse_event({
-                        "id": id_,
-                        "object": "chat.completion.chunk",
-                        "model": model,
-                        "choices": [{"index": 0, "delta": {"tool_calls": message["tool_calls"]}, "finish_reason": finish_reason}]
-                    })
-                elif "content" in message:
-                    yield sse_event({
-                        "id": id_,
-                        "object": "chat.completion.chunk",
-                        "model": model,
-                        "choices": [{"index": 0, "delta": {"content": message["content"]}, "finish_reason": finish_reason}]
-                    })
-
-            if "usage" in resp:
-                yield sse_event({
-                    "id": id_,
-                    "object": "chat.completion.chunk",
-                    "model": model,
-                    "choices": [],
-                    "usage": resp["usage"]
-                })
-            return
-
         payload = build_payload(req, o, stream=True)
+        stream_timeout = httpx.Timeout(connect=30.0, read=300.0, write=60.0, pool=30.0)
         try:
             async with self.client.stream(
                 "POST",
                 self._url(o),
                 json=payload,
                 headers=self._headers(o, api_key, idempotency_key),
-                timeout=timeout,
+                timeout=stream_timeout,
             ) as r:
                 if r.status_code >= 400:
                     body = (await r.aread()).decode("utf-8", "replace")

@@ -46,7 +46,7 @@ def test_ui_v5_three_tabs_rendering(monkeypatch):
             assert "text/html" in r_setup.headers["content-type"]
             assert "Waypost — Setup" in r_setup.text
             assert "Router Subsystems & Effects" in r_setup.text
-            assert "Local Engines & Metal Memory" in r_setup.text
+            assert "Local Engines" in r_setup.text
             assert "Keys & Provider Health" in r_setup.text
             assert "Data Health & Exploration" in r_setup.text
             assert "Beta Measurement & Ensemble Assessment" in r_setup.text

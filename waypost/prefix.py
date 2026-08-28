@@ -90,6 +90,17 @@ def build_payload(
         payload["messages"] = order_messages(payload["messages"])
     payload = apply_cache_points(payload, o)
     payload["stream"] = stream
+
+    # Ensure coding/agent requests have sufficient output token budget if not specified
+    if payload.get("max_tokens") is None:
+        default_out = o.max_output or 4096
+        payload["max_tokens"] = min(default_out, 8192)
+
+    # Ensure Ollama doesn't stop after default 128 tokens
+    if "ollama" in o.provider.lower() or (o.is_local and "mlx" not in o.provider.lower()):
+        num_predict = payload.get("max_tokens") or o.max_output or 4096
+        payload["options"] = {**payload.get("options", {}), "num_predict": num_predict}
+
     if getattr(req, "thinking_mode", False):
         if "mlx" in o.provider.lower():
             payload["enable_thinking"] = True

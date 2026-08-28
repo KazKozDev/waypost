@@ -49,6 +49,8 @@ def client(monkeypatch):
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(f"{request.url.host}:{request.url.port}")
+        if request.method == "GET" and request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "qwen"}]})
         return httpx.Response(
             200,
             json={
@@ -237,6 +239,51 @@ def test_tools_support_and_message_ordering(client):
     assert r.status_code == 200
 
 
+def test_stream_failure_before_first_chunk_returns_json_error(client, monkeypatch):
+    import waypost.server as srv
+    from waypost.schemas import RouterError
+
+    async def failed_stream(req, profile, plan, meta):
+        if False:
+            yield b""
+        raise RouterError("upstream unavailable", 502, meta)
+
+    monkeypatch.setattr(srv.app.state.executor, "stream", failed_stream)
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "auto",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+
+    assert r.status_code == 502
+    assert r.headers["content-type"].startswith("application/json")
+    assert r.json()["error"]["message"] == "upstream unavailable"
+
+
+def test_stream_preflight_preserves_chunks_and_adds_done(client, monkeypatch):
+    import waypost.server as srv
+
+    async def successful_stream(req, profile, plan, meta):
+        yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+
+    monkeypatch.setattr(srv.app.state.executor, "stream", successful_stream)
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "auto",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+
+    assert r.status_code == 200
+    assert r.text.count('"content":"hi"') == 1
+    assert r.text.count("data: [DONE]") == 1
+
+
 def test_chat_html_endpoints(client):
     for path in ("/", "/chat", "/v1/chat"):
         r = client.get(path)
@@ -304,3 +351,79 @@ def test_routing_profile_and_savings_in_server(client):
     r_stats_html = client.get("/v1/stats", headers={"Accept": "text/html"})
     assert r_stats_html.status_code == 200
     assert "Cost Savings vs Paid Commercial APIs" in r_stats_html.text
+
+
+def test_providers_page_and_key_management(client, tmp_path, monkeypatch):
+    # This test saves and deletes keys for real. Without redirecting the
+    # store it edits the developer's own .env and macOS Keychain — and the
+    # delete at the end wipes whatever real GROQ key was there.
+    from waypost import keychain, keys
+
+    monkeypatch.setattr(keys, "ENV_FILE", tmp_path / "env")
+    monkeypatch.setattr(keychain, "put", lambda *a, **k: True)
+    monkeypatch.setattr(keychain, "delete", lambda *a, **k: True)
+    monkeypatch.setattr(keychain, "get", lambda *a, **k: None)
+
+    # GET /providers HTML
+    r_page = client.get("/providers")
+    assert r_page.status_code == 200
+    assert "Providers & API Keys" in r_page.text
+    assert "GROQ_API_KEY" in r_page.text
+    assert "Providers" in r_page.text
+
+    # GET /v1/providers/keys
+    r_keys = client.get("/v1/providers/keys")
+    assert r_keys.status_code == 200
+    data = r_keys.json()
+    assert "providers" in data
+    assert "summary" in data
+    assert any(p["env_var"] == "GROQ_API_KEY" for p in data["providers"])
+
+    # POST /v1/providers/keys
+    r_save = client.post(
+        "/v1/providers/keys",
+        json={
+            "provider": "groq",
+            "env_var": "GROQ_API_KEY",
+            "api_key": "gsk_test123456789",
+        },
+    )
+    assert r_save.status_code == 200
+    save_data = r_save.json()
+    assert save_data["status"] == "ok"
+    assert "gsk_" in save_data["masked_key"]
+
+    # An empty api_key must NOT delete: the UI clears the field after every
+    # save, so treating empty as "remove" destroyed keys on a stray click.
+    r_empty_save = client.post(
+        "/v1/providers/keys",
+        json={"provider": "groq", "env_var": "GROQ_API_KEY", "api_key": ""},
+    )
+    assert r_empty_save.status_code == 400
+    assert "GROQ_API_KEY" in (keys.ENV_FILE).read_text()
+
+    # DELETE /v1/providers/keys
+    r_del = client.request(
+        "DELETE",
+        "/v1/providers/keys",
+        json={"provider": "groq", "env_var": "GROQ_API_KEY"},
+    )
+    assert r_del.status_code == 200
+    assert r_del.json()["status"] == "ok"
+
+    # POST /v1/active-model
+    r_act = client.post(
+        "/v1/active-model",
+        json={"model": "groq/llama-3.3-70b-versatile", "mode": "cloud"},
+    )
+    assert r_act.status_code == 200
+    assert r_act.json()["status"] == "ok"
+
+    # GET /health
+    r_health = client.get("/health")
+    assert r_health.status_code == 200
+    health_data = r_health.json()
+    assert health_data["status"] == "ok"
+    assert "last_mode" in health_data
+    assert health_data["last_mode"] == "cloud"
+    assert health_data["last_model"] == "groq/llama-3.3-70b-versatile"
