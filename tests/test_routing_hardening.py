@@ -398,18 +398,47 @@ def test_scoring_uses_measured_latency_not_the_manifest(db):
 # ------------------------------------------------------------ diversify
 
 
+def named(provider, model_id, score):
+    o = Offering(
+        provider=provider, model_id=model_id, base_url=f"http://{provider}/v1",
+        caps=CAPS, quality_score=0.9, limit_rpd=100,
+    )
+    return Candidate(o, score, {})
+
+
 def test_plan_does_not_stack_one_provider():
     """Four models behind one host is not a ladder: when the host refuses,
     every rung fails together."""
     made = [
-        Candidate(cloud("a", 1), 1.0, {}),
-        Candidate(cloud("a", 1), 0.9, {}),
-        Candidate(cloud("a", 1), 0.8, {}),
-        Candidate(cloud("b", 2), 0.7, {}),
+        named("a", "qwen3-32b", 1.0),
+        named("a", "llama-3.3-70b", 0.9),
+        named("a", "gemma-27b", 0.8),
+        named("b", "mistral-large", 0.7),
     ]
     out = _diversify(made, per_provider=2)
     assert [c.offering.provider for c in out[:3]] == ["a", "a", "b"]
     assert len(out) == 4  # nothing is lost, the excess moves to the tail
+
+
+def test_plan_does_not_stack_one_model_either():
+    """Three hosts serving the same weights look diverse and are not: if
+    the failure is the model, every rung fails identically."""
+    made = [
+        named("groq", "llama-3.3-70b", 1.0),
+        named("openrouter", "meta-llama/llama-3.3-70b-instruct:free", 0.9),
+        named("nvidia", "nemotron-3-super-120b", 0.8),  # a Llama derivative
+        named("cerebras", "qwen3-32b", 0.7),
+    ]
+    out = _diversify(made, per_provider=2, per_family=2)
+    assert [c.offering.provider for c in out[:3]] == ["groq", "openrouter", "cerebras"]
+
+
+def test_an_unrecognised_model_is_its_own_family():
+    """Over-estimating diversity costs one redundant attempt; under-
+    estimating it removes a real fallback."""
+    made = [named("a", "weird-thing-9000", 1.0), named("b", "other-thing", 0.9)]
+    out = _diversify(made, per_family=1)
+    assert [c.offering.provider for c in out] == ["a", "b"]
 
 
 # ------------------------------------------------------------- inflight

@@ -7,17 +7,21 @@ be outweighed, a rule cannot.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
 
 from .bandit import Bandit
 from .breaker import CircuitBreaker
+from .families import model_family
 from .latency import LatencyTracker
 from .ledger import Ledger
 from .neighbors import NeighborIndex
 from .registry import Offering, Registry
 from .schemas import Capability, ChatRequest, RequestProfile, Tier
+
+log = logging.getLogger("waypost.router")
 
 TIER_ORDER = {Tier.S: 0, Tier.M: 1, Tier.L: 2}
 
@@ -88,21 +92,33 @@ class Candidate:
     reasons: dict[str, float]
 
 
-def _diversify(cands: list["Candidate"], per_provider: int = 2) -> list["Candidate"]:
-    """Cap how many candidates one provider may occupy in a plan.
+def _diversify(
+    cands: list["Candidate"], per_provider: int = 2, per_family: int = 2
+) -> list["Candidate"]:
+    """Cap how many candidates one provider — or one model — may occupy.
 
-    A plan of four models that all live behind the same host is not a
-    fallback ladder — when that host rate limits or goes down, every rung
-    fails at once. Ordering within the plan is preserved; only the excess
-    is pushed to the tail, so nothing is lost if the pool is thin.
+    Two axes, because they protect against different things. A plan of
+    four models behind one host fails together when the host does. A plan
+    of four *different hosts serving the same weights* looks diverse and
+    is not: if the failure is the model — no tool calling, wrong
+    language, too small for the task — every rung fails identically and
+    the ladder spends four attempts learning one fact.
+
+    Ordering is preserved; the excess is pushed to the tail rather than
+    dropped, so a thin pool loses nothing.
     """
     kept: list[Candidate] = []
     spill: list[Candidate] = []
-    seen: dict[str, int] = {}
+    providers: dict[str, int] = {}
+    families: dict[str, int] = {}
     for c in cands:
-        n = seen.get(c.offering.provider, 0)
-        if n < per_provider:
-            seen[c.offering.provider] = n + 1
+        fam = model_family(c.offering.model_id)
+        if (
+            providers.get(c.offering.provider, 0) < per_provider
+            and families.get(fam, 0) < per_family
+        ):
+            providers[c.offering.provider] = providers.get(c.offering.provider, 0) + 1
+            families[fam] = families.get(fam, 0) + 1
             kept.append(c)
         else:
             spill.append(c)
@@ -123,6 +139,8 @@ class Router:
         inflight: dict[str, int] | None = None,
         stochastic: bool = True,
         neighbors: NeighborIndex | None = None,
+        escalation_threshold: float = 0.5,
+        escalation_trust: float = 0.6,
     ):
         self.registry = registry
         self.ledger = ledger
@@ -145,6 +163,11 @@ class Router:
         # Sharper than the bandit's five task buckets, and unlike the
         # predictor it needs no training step.
         self.neighbors = neighbors
+        # Above this failure share among similar past queries, and with at
+        # least this much evidence, the plan starts a tier higher instead
+        # of paying for the cheap attempt twice.
+        self.escalation_threshold = escalation_threshold
+        self.escalation_trust = escalation_trust
         # Sticky routing: switching providers zeroes a warmed-up prefix,
         # and that is more expensive than a small scoring loss. Two
         # binding keys: the session (a dialogue) and the hash of the
@@ -442,6 +465,30 @@ class Router:
             req, p, limit, quality_floor=quality_floor, prefix=prefix
         )
 
+    def predicted_tier(self, p: RequestProfile, floor: Tier | None = None) -> Tier:
+        """Raise the starting tier when queries like this one have needed
+        escalating before.
+
+        The cascade is measured, not assumed: this only fires where the
+        neighbourhood is both confident and pessimistic. Raising the tier
+        on thin evidence would give up the saving the cascade exists for.
+        """
+        tier = floor or p.tier
+        if self.neighbors is None or getattr(p, "embedding", None) is None:
+            return tier
+        risk, trust = self.neighbors.escalation_risk(p.embedding)
+        if trust < self.escalation_trust or risk < self.escalation_threshold:
+            return tier
+        nxt = {Tier.S: Tier.M, Tier.M: Tier.L, Tier.L: Tier.L}[tier]
+        if nxt is not tier:
+            log.info(
+                "PREEMPT tier %s → %s (similar queries escalated %.0f%% of the time)",
+                tier.value,
+                nxt.value,
+                risk * 100,
+            )
+        return nxt
+
     def _refresh_neighbors(self, p: RequestProfile) -> None:
         """One neighbourhood lookup per request, shared by every candidate.
 
@@ -475,6 +522,13 @@ class Router:
                 if self._passes(o, req, p, floor)
                 and (min_tier is None or TIER_ORDER[o.tier] >= TIER_ORDER[min_tier])
             ]
+
+        # Pre-empt a likely escalation: raising the floor before the call
+        # is cheaper than the cheap model plus the escalation after it.
+        if min_tier is None:
+            predicted = self.predicted_tier(p)
+            if TIER_ORDER[predicted] > TIER_ORDER[p.tier]:
+                min_tier = predicted
 
         cands = survivors(quality_floor)
         if not cands and quality_floor:

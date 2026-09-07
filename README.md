@@ -185,6 +185,50 @@ python -m scripts.train_predictor --db var/router.db --out var/predictor.json
 On too little data it trains nothing and says so, and the router falls
 back to the prior — which is the correct answer, not a failure.
 
+## Not every wrong answer costs the same
+
+A garbled sentence in a chat reply and a wrong number in a migration
+script both used to cost "one failed request", so the router spent the
+same care on both. Stakes change three things: the quality floor, the
+time budget, and whether a doubtful answer is re-asked or shipped.
+
+```bash
+curl ... -H 'x-waypost-stakes: critical'      # or "stakes" in the body
+```
+
+Where the caller does not say, it is inferred — but only upward. A tool
+call is an action the answer causes, not a message; a JSON schema means a
+machine will parse it and an exception is waiting downstream. A router
+that quietly decides a request is unimportant is worse than one that
+treats everything alike, so nothing is ever talked *down*.
+
+The cascade also stops being purely reactive. Escalating pays for the
+cheap attempt twice — once in latency, once in quota — so when queries
+resembling this one have needed escalating before, the plan starts a tier
+higher instead. Only where the neighbourhood is both confident and
+pessimistic: raising the tier on two anecdotes would surrender the saving
+the cascade exists for.
+
+## What the router did not choose
+
+Every outcome it learns from is the outcome of the model it picked;
+nothing says what the runner-up would have done. That is the standard
+bias of on-policy data. Duplicating live requests to fix it was tried and
+removed — it cost 10% of the free-tier quota and the user waited for
+nothing.
+
+So shadow calls run only where the second request is free to the user: a
+cache hit that already has its answer, or a batch job nobody is waiting
+on, within 5% of traffic and never while the shadowed model's quota is
+under pressure. The verdict goes into the neighbourhood; the answer is
+discarded.
+
+Diversity in a plan is now two axes rather than one. Provider diversity
+protects against a host being down. Family diversity protects against a
+model being wrong: three hosts serving the same Llama-70B look diverse
+and are not — if the failure is the model, every rung of the ladder fails
+identically.
+
 ## The pool updates itself
 
 Discovery finds new free models, probing measures them, providers retire

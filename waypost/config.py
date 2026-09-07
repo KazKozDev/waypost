@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     enable_neighbors: bool = True
     neighbor_capacity: int = 5000
 
+    # Counterfactual evidence: ask a model we did not pick, but only
+    # where the user is not waiting — a cache hit or a batch job. Learning
+    # only from your own choices is the standard bias of on-policy data;
+    # paying for it with live latency was tried and removed.
+    enable_shadow: bool = True
+    shadow_budget: float = 0.05
+
     # Implicit feedback: read the user's next action as a verdict on the
     # last answer. The only quality signal that exists for free-form
     # text, where the verifier has nothing to check.

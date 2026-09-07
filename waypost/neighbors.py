@@ -154,6 +154,30 @@ class NeighborIndex:
             estimates[offering] = (mean, trust)
         return estimates
 
+    def escalation_risk(self, embedding: Any) -> tuple[float, float]:
+        """(share of similar past requests that needed escalating, trust).
+
+        The cascade is reactive: try the cheap model, verify, escalate.
+        Every escalation pays for the cheap attempt twice — once in
+        latency, once in quota. When queries like this one have needed
+        escalating before, the cheap rung is not a saving, it is a tax,
+        and the plan should start higher.
+
+        This reuses the neighbourhood rather than training a second
+        model: the question "did requests like this one work out" is the
+        same question, read the other way round.
+        """
+        est = self.estimate(embedding)
+        if not est:
+            return 0.0, 0.0
+        # Weight each offering's local success by how much of the
+        # neighbourhood it accounts for, then read the failure share.
+        total_trust = sum(trust for _, trust in est.values())
+        if total_trust <= 0:
+            return 0.0, 0.0
+        mean_reward = sum(m * t for m, t in est.values()) / total_trust
+        return max(0.0, min(1.0, 1.0 - mean_reward)), min(1.0, total_trust)
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {

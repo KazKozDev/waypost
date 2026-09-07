@@ -21,11 +21,14 @@ from typing import Any
 from .guard import Guard, GuardResult
 from .pii import detect as detect_pii
 from .schemas import ChatRequest, RequestProfile, Tier
+from .stakes import StakesProfile, classify_stakes
 
 # Minimum quality per tier. Prevents a router out of quota from
 # downgrading an L task to a model that obviously cannot carry it: a
 # honest local model is better than fast garbage from a free tier.
 QUALITY_FLOOR = {Tier.S: 0.0, Tier.M: 0.35, Tier.L: 0.55}
+
+TIER_ORDER = {Tier.S: 0, Tier.M: 1, Tier.L: 2}
 
 
 @dataclass
@@ -34,6 +37,11 @@ class PolicyDecision:
     privacy_reasons: list[str] = field(default_factory=list)
     latency_class: str = "interactive"
     quality_floor: float = 0.0
+    stakes: str = "normal"
+    stakes_reason: str = ""
+    deadline_factor: float = 1.0
+    escalation_factor: float = 1.0
+    min_tier: Tier | None = None
     routing_profile: str = "auto"
     guard: GuardResult = field(default_factory=GuardResult)
     neutralized: int = 0
@@ -42,6 +50,11 @@ class PolicyDecision:
 
     def as_meta(self) -> dict[str, Any]:
         out: dict[str, Any] = {}
+        if self.stakes != "normal":
+            out["stakes"] = self.stakes
+            out["stakes_reason"] = self.stakes_reason
+            out["deadline_factor"] = self.deadline_factor
+            out["escalation_factor"] = self.escalation_factor
         if self.privacy_reasons:
             out["pii"] = self.privacy_reasons
         if self.routing_profile and self.routing_profile != "auto":
@@ -80,10 +93,28 @@ class Policy:
         elif req.profile == "reasoning":
             profile.tier = Tier.L
 
+        # What a wrong answer costs here. Declared by the caller where it
+        # can be; inferred only upward, never down — a router that quietly
+        # decides a request is unimportant is worse than one that treats
+        # everything alike.
+        stakes: StakesProfile = classify_stakes(req, req.stakes)
+        if stakes.min_tier is not None and TIER_ORDER[stakes.min_tier] > TIER_ORDER[
+            profile.tier
+        ]:
+            profile.tier = stakes.min_tier
+
         d = PolicyDecision(
             privacy=req.privacy,
             latency_class=req.latency_class,
-            quality_floor=self.quality_floor.get(profile.tier, 0.0),
+            quality_floor=max(
+                0.0,
+                self.quality_floor.get(profile.tier, 0.0) + stakes.quality_floor_bonus,
+            ),
+            stakes=stakes.level,
+            stakes_reason=stakes.reason,
+            deadline_factor=stakes.deadline_factor,
+            escalation_factor=stakes.escalation_factor,
+            min_tier=stakes.min_tier,
             routing_profile=req.profile,
         )
 

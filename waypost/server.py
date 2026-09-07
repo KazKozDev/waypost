@@ -20,6 +20,7 @@ import asyncio
 import base64 as _b64
 import json
 import logging
+import random
 import os as _os
 import time
 from contextlib import asynccontextmanager
@@ -88,6 +89,27 @@ def setup_logging(level: str) -> None:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+
+
+def _maybe_shadow(req: ChatRequest, profile: RequestProfile) -> None:
+    """Ask a model we did NOT pick, where nobody is waiting for it.
+
+    Everything the router learns is the outcome of the model it chose;
+    nothing tells it what the runner-up would have done. Duplicating live
+    requests to fix that cost 10% of the quota and was removed. Cache
+    hits and batch jobs are the exception: the user has their answer, or
+    is not waiting at all, so the second call is free to them.
+    """
+    if not settings.enable_shadow:
+        return
+    try:
+        plan = app.state.router.plan(req, profile, limit=3)
+        alternatives = [c for c in plan if not c.offering.is_local]
+        if len(alternatives) < 2:
+            return
+        app.state.executor.spawn_shadow(random.choice(alternatives[1:]), req, profile)
+    except Exception as exc:  # noqa: BLE001 — never let this reach the client
+        log.debug("shadow not spawned: %s", exc)
 
 
 def _pool_success(telemetry) -> tuple[int, float]:
@@ -283,6 +305,9 @@ async def lifespan(app: FastAPI):
         latency=latency,
         rate_governor=rate_governor,
         inflight=inflight,
+        neighbors=neighbors,
+        enable_shadow=settings.enable_shadow,
+        shadow_budget=settings.shadow_budget,
         deadlines={
             "interactive": settings.deadline_interactive_s,
             "code_completion": settings.deadline_code_s,
@@ -697,6 +722,8 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
         metrics.inc("waypost_requests_total", status="blocked")
         raise RouterError(decision.block_reason, 400, meta)
     meta.policy = decision.as_meta()
+    meta.stakes = decision.stakes
+    meta.stakes_reason = decision.stakes_reason or None
     if decision.guard.tripped:
         log.warning(
             "GUARD %s in untrusted block → %s",
@@ -747,6 +774,9 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
         log.info(
             "CACHE exact hit task=%s tier=%s", profile.task_class, profile.tier.value
         )
+        # The answer is already served, so a second call costs the user
+        # nothing — the one place where counterfactual evidence is free.
+        _maybe_shadow(req, profile)
         metrics.inc("waypost_cache_hits_total", level="exact")
         metrics.inc("waypost_requests_total", status="cache")
         entry = AttemptLogEntry(
@@ -825,6 +855,7 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
                     profile.task_class,
                     profile.tier.value,
                 )
+                _maybe_shadow(req, profile)
                 metrics.inc("waypost_cache_hits_total", level="semantic")
                 metrics.inc("waypost_requests_total", status="cache")
                 entry = AttemptLogEntry(
@@ -914,6 +945,16 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
     # escalate first locally with thinking ON, then to a higher tier.
     if settings.enable_verifier:
         ok, reason = app.state.verifier.verify(req, profile, resp.model_dump())
+        if not ok and decision.escalation_factor < 1.0 and reason in (
+            "language_mismatch",
+            "degenerate",
+        ):
+            # Low stakes: a soft doubt is not worth a second call. Hard
+            # failures — invalid JSON, broken code, a missing tool call —
+            # still escalate, because shipping those breaks the caller
+            # regardless of how little the answer mattered.
+            log.info("VERIFY %s ignored at stakes=%s", reason, decision.stakes)
+            ok = True
         if not ok:
             log.warning("VERIFY fail reason=%s → escalate", reason)
             meta.escalated = True
@@ -3758,6 +3799,11 @@ async def metrics_endpoint():
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatRequest, request: Request):
     # Routing profile: explicit in body or passed via header/query
+    stakes_hdr = request.headers.get("x-waypost-stakes") or request.query_params.get(
+        "stakes"
+    )
+    if stakes_hdr in ("low", "normal", "high", "critical"):
+        req.stakes = stakes_hdr
     profile_hdr = request.headers.get("x-waypost-profile") or request.query_params.get(
         "profile"
     )

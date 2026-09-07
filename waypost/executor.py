@@ -188,6 +188,10 @@ class Executor:
         deadlines: dict[str, float] | None = None,
         hedge_window_s: float = 300.0,
         triggers: Any | None = None,
+        neighbors: Any | None = None,
+        enable_shadow: bool = True,
+        shadow_budget: float = 0.05,
+        shadow_timeout_s: float = 30.0,
     ):
         self.adapter = adapter
         self.ledger = ledger
@@ -203,6 +207,13 @@ class Executor:
         # probe, by which time the model may be long gone.
         self.triggers = triggers
         self._error_runs: dict[str, int] = {}
+        # Counterfactual evidence goes straight into the neighbourhood:
+        # it is the one consumer that can use "model X would have done
+        # this on a query like that" without a training step.
+        self.neighbors = neighbors
+        self.enable_shadow = enable_shadow
+        self.shadow_budget = shadow_budget
+        self.shadow_timeout_s = shadow_timeout_s
         self.verifier = verifier or Verifier()
         self.max_attempts = max_attempts
         self.timeout_s = timeout_s
@@ -218,6 +229,7 @@ class Executor:
             "billed": 0,
             "deadline_exceeded": 0,
             "explorations": 0,
+            "shadows": 0,
         }
         # Fire-and-forget exploration tasks: asyncio only holds a weak
         # reference, so without this set they can be collected mid-flight.
@@ -228,10 +240,16 @@ class Executor:
         self._hedge_times: deque[float] = deque()
 
     # ------------------------------------------------------------ deadline
-    def budget_for(self, req: ChatRequest) -> float:
-        return self.deadlines.get(
+    def budget_for(self, req: ChatRequest, factor: float = 1.0) -> float:
+        """The wall-clock budget, scaled by what a wrong answer costs.
+
+        It is worth waiting longer for an answer that will be acted on,
+        and not worth it for one that will be glanced at.
+        """
+        base = self.deadlines.get(
             req.profile or "", self.deadlines.get(req.latency_class, DEFAULT_DEADLINE_S)
         )
+        return max(MIN_SLICE_S * 2, base * max(0.25, factor))
 
     # --------------------------------------------------------------- util
     def _bandit_update(self, o: Offering, profile: RequestProfile, ok: bool) -> None:
@@ -748,6 +766,12 @@ class Executor:
                 # RETRY: 5xx, timeouts, connection errors. Health signal.
                 self.breaker.on_failure(o.provider)
                 self._note_error_run(o)
+                if exc.status == 408:
+                    # It did not fail, it ran out of its slice. Retrying
+                    # the provider that already proved too slow spends the
+                    # ladder's remaining budget on the least likely rung —
+                    # a 5xx is worth another go, "you were slow" is not.
+                    break
                 if attempt + 1 < self.retries_per_provider:
                     await self._backoff(attempt, deadline)
         return last or Attempt(
@@ -859,6 +883,68 @@ class Executor:
                 last = res
         return last or Attempt(offering=o, key_index=key_index)
 
+    async def shadow(
+        self,
+        cand: Candidate,
+        req: ChatRequest,
+        profile: RequestProfile,
+    ) -> None:
+        """Ask a second model the same question, and keep only the answer's
+        verdict.
+
+        This is the counterfactual the router otherwise never sees. Every
+        outcome it learns from is the outcome of the model it chose;
+        nothing says what the model it passed over would have done, which
+        is the standard bias of learning from your own policy.
+
+        Duplicating live requests to fix that was tried and removed: it
+        cost 10% of the free-tier quota and the user waited for nothing.
+        So shadows run only where the second call is genuinely free to the
+        user — a cache hit that already has its answer, or a batch job
+        that nobody is waiting on — and only while the shadowed
+        offering's quota is not under pressure.
+        """
+        o = cand.offering
+        if self.ledger.pressure(o) > 0.4:
+            return
+        key_index = self.ledger.pick_key(o, profile.est_total_tokens)
+        if key_index is None:
+            return
+        self._counters["shadows"] += 1
+        try:
+            res = await self._call(
+                o,
+                req,
+                profile,
+                key_index,
+                routing_source="shadow",
+                is_exploration=True,
+                attempt_no=98,
+                timeout=self.shadow_timeout_s,
+            )
+        except Exception as exc:  # noqa: BLE001 — a shadow must never surface
+            log.debug("shadow call failed: %s", exc)
+            return
+        if res.ok and self.neighbors is not None and profile.embedding is not None:
+            ok, _ = self.verifier.verify(
+                req, profile, res.response.model_dump() if res.response else {}
+            )
+            self.neighbors.add(profile.embedding, o.key, 1.0 if ok else 0.0)
+
+    def spawn_shadow(
+        self, cand: Candidate, req: ChatRequest, profile: RequestProfile
+    ) -> bool:
+        """Fire a shadow in the background, within budget."""
+        if not self.enable_shadow or self.neighbors is None:
+            return False
+        done = max(1, self._counters["requests"])
+        if self._counters["shadows"] / done >= self.shadow_budget:
+            return False
+        task = asyncio.create_task(self.shadow(cand, req, profile))
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        return True
+
     async def _run_exploration(
         self, cand: Candidate, req: ChatRequest, profile: RequestProfile, req_id: str
     ) -> None:
@@ -903,15 +989,16 @@ class Executor:
         last: ProviderError | None = None
         # One budget for the whole ladder, not per attempt. Descending the
         # ladder must never take longer than the answer is worth.
-        deadline = time.monotonic() + self.budget_for(req)
-        meta.deadline_s = round(self.budget_for(req), 1)
+        budget = self.budget_for(req, float(meta.policy.get("deadline_factor", 1.0)))
+        deadline = time.monotonic() + budget
+        meta.deadline_s = round(budget, 1)
 
         for i, cand in enumerate(candidates):
             if self._left(deadline) < MIN_SLICE_S:
                 self._counters["deadline_exceeded"] += 1
                 log.warning(
                     "DEADLINE %.1fs exhausted after %d attempts (path %s)",
-                    self.budget_for(req),
+                    budget,
                     meta.attempts,
                     ">".join(meta.fallback_path),
                 )
@@ -1120,6 +1207,7 @@ class Executor:
             "billed": self._counters["billed"],
             "deadline_exceeded": self._counters["deadline_exceeded"],
             "explorations": self._counters["explorations"],
+            "shadows": self._counters["shadows"],
             "inflight": dict(self.inflight),
             "rate_limits": self.rate_governor.snapshot(),
             # Over the window the budget actually governs, not over uptime.

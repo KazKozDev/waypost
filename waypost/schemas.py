@@ -51,6 +51,10 @@ class ChatRequest(BaseModel):
         "auto", "code_completion", "reasoning", "privacy_only", "balanced"
     ] = "auto"
     session_id: str | None = None
+    # What a wrong answer costs here. Moves the quality floor, the time
+    # budget and the willingness to escalate — the router cannot know
+    # from the text alone whether this is a draft or a migration script.
+    stakes: Literal["low", "normal", "high", "critical"] | None = None
     no_cache: bool = False
     thinking_mode: bool = False
     # A retry with the same key must not run twice: a client whose
@@ -65,6 +69,7 @@ class ChatRequest(BaseModel):
             "profile",
             "session_id",
             "no_cache",
+            "stakes",
             "thinking_mode",
             "idempotency_key",
             "model",
@@ -112,6 +117,8 @@ class RouterMeta(BaseModel):
     # 504 readable: the client can see it was cut off, not that every
     # provider refused.
     deadline_s: float = 0.0
+    stakes: str | None = None
+    stakes_reason: str | None = None
     # Which version of the offering pool produced this decision. After a
     # hot swap it is the only way to tell whether a routing change came
     # from the pool or from the scoring.

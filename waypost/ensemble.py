@@ -10,6 +10,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from .families import get_model_family
 from .schemas import ChatRequest, ChatResponse, RequestProfile
 from .verify import Verifier
 
@@ -20,24 +21,8 @@ if TYPE_CHECKING:
 log = logging.getLogger("waypost.ensemble")
 
 
-def get_model_family(model_id: str) -> str:
-    """Extracts base family to ensure proposer diversity (Qwen, Llama, DeepSeek, Gemma, Mistral, etc.)."""
-    low = model_id.lower()
-    if "qwen" in low:
-        return "qwen"
-    if "llama" in low:
-        return "llama"
-    if "deepseek" in low:
-        return "deepseek"
-    if "gemma" in low:
-        return "gemma"
-    if "mistral" in low or "mixtral" in low:
-        return "mistral"
-    if "claude" in low:
-        return "claude"
-    if "gpt" in low or "o1" in low or "o3" in low:
-        return "openai"
-    return model_id.split("/")[0] if "/" in model_id else "other"
+# The family table lives in waypost/families.py: the plan ladder needs it
+# too, and two copies of "is this the same model" would drift apart.
 
 
 async def self_consistency_sample(
