@@ -23,6 +23,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from .ledger import Ledger
 from .registry import Offering
@@ -50,8 +51,13 @@ class RateGovernor:
         burst_window_s: float = 60.0,
         calm_s: float = 300.0,
         burst_threshold: int = 2,
+        shared: Any | None = None,
     ):
         self.ledger = ledger
+        # The learned limit is a property of the provider's account, not
+        # of one replica's traffic. Shared, every replica benefits from
+        # the refusal any one of them collected.
+        self.shared = shared
         self.shrink = shrink
         self.grow = grow
         self.floor = floor
@@ -69,6 +75,33 @@ class RateGovernor:
     def _apply(self, o: Offering, key_index: int, st: _Learned) -> None:
         limit = max(1, int(round(st.declared_rpm * st.factor)))
         self.ledger.set_limit(o, key_index, "rpm", limit)
+        if self.shared is not None:
+            self.shared.set_factor(self._slot(o, key_index), st.factor)
+
+    def sync_from_shared(self, offerings: list[Offering]) -> int:
+        """Adopt limits other replicas learned. Called by the control
+        plane, not on the hot path."""
+        if self.shared is None:
+            return 0
+        updated = 0
+        for o in offerings:
+            if not o.limit_rpm:
+                continue
+            for idx in range(max(1, o.key_count)):
+                slot = self._slot(o, idx)
+                factor = self.shared.get_factor(slot)
+                if factor is None or factor >= 1.0:
+                    continue
+                with self._lock:
+                    st = self._learned.setdefault(
+                        slot, _Learned(declared_rpm=o.limit_rpm)
+                    )
+                    if abs(st.factor - factor) < 1e-6:
+                        continue
+                    st.factor = factor
+                    self._apply(o, idx, st)
+                updated += 1
+        return updated
 
     # --------------------------------------------------------------- api
     def on_rate_limit(self, o: Offering, key_index: int = 0) -> None:

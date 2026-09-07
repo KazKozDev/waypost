@@ -260,9 +260,36 @@ def _parse_offering(provider: dict, model: dict) -> Offering:
     )
 
 
+# Runtime state an offering earns by serving traffic. A rebuild of the
+# registry from the manifest must carry it over, or every hot reload
+# would throw away everything the control plane learned and start the
+# pool cold — measured TTFT, reliability, lifecycle, the record of which
+# models turned out to be paid.
+LEARNED_FIELDS = (
+    "ttft_p50_ms",
+    "success_rate",
+    "quality_score",
+    "limit_rpm",
+    "limit_rpd",
+    "limit_tpm",
+    "lifecycle",
+    "miss_streak",
+    "dead_streak",
+    "quarantined_at",
+    "runtime_available",
+    "enabled",
+    "weight",
+    "caps",
+)
+
+
 class Registry:
     def __init__(self, offerings: list[Offering] | None = None):
         self._offerings: dict[str, Offering] = {o.key: o for o in (offerings or [])}
+        # Bumped on every hot swap. Returned in the router block of each
+        # response, so a routing decision can be tied to the pool that
+        # produced it.
+        self.version: int = 1
 
     @classmethod
     def from_manifest(cls, path: str | Path) -> "Registry":
@@ -394,6 +421,41 @@ class Registry:
             # record outranks any later claim of being free.
             and not (not o.free and o.free_source == pricing.Source.BILLED.value)
         ]
+
+    # ------------------------------------------------------------- swap
+    def offerings_map(self) -> dict[str, Offering]:
+        """The live mapping. Callers must treat it as read-only."""
+        return self._offerings
+
+    def carry_over(self, fresh: list[Offering]) -> list[Offering]:
+        """Copy learned runtime state from the live pool onto a rebuilt one."""
+        for o in fresh:
+            old = self._offerings.get(o.key)
+            if old is None:
+                continue
+            for field in LEARNED_FIELDS:
+                value = getattr(old, field, None)
+                if value is not None:
+                    setattr(o, field, value)
+            # A billing proof outranks any later manifest claim.
+            if not old.free and old.free_source == pricing.Source.BILLED.value:
+                o.free = False
+                o.free_source = old.free_source
+                o.free_detail = old.free_detail
+        return fresh
+
+    def swap(self, fresh: list[Offering]) -> int:
+        """Replace the whole pool by rebinding one reference.
+
+        Requests already in flight hold their Offering objects directly
+        (the plan is a list of them), so they finish against the pool
+        they were planned on. Readers that go through the registry see
+        either the old mapping or the new one, never a half-built one —
+        which a piecemeal add/remove could not promise.
+        """
+        self._offerings = {o.key: o for o in fresh}
+        self.version += 1
+        return self.version
 
     def apply_probe(self, key: str, **measured) -> None:
         """Probe results flow into the registry without a reload."""

@@ -147,6 +147,20 @@ class Settings(BaseSettings):
     # whole measurement layer was dead: latency, real rate limits and
     # working (as opposed to declared) capabilities all came from the
     # manifest and never changed.
+    # Shared state across replicas. Empty means single-node: quota,
+    # breaker and learned rate limits live in this process, and the
+    # instance lock refuses a second one. Set this and the three shared
+    # counters move to Redis, which is what makes a second replica safe.
+    redis_url: str = ""
+    redis_namespace: str = "waypost"
+    cluster_sync_interval_s: float = 15.0
+
+    # Hot reload of the offering pool: validated staging build, atomic
+    # swap, and a rollback if the error rate regresses afterwards.
+    enable_hot_reload: bool = True
+    reload_interval_h: float = 6.0
+    reload_observe_window_s: float = 600.0
+
     enable_probe: bool = True
     probe_interval_h: float = 24.0
     # A quarantined offering gets one call after this long to prove it is

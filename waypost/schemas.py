@@ -112,6 +112,10 @@ class RouterMeta(BaseModel):
     # 504 readable: the client can see it was cut off, not that every
     # provider refused.
     deadline_s: float = 0.0
+    # Which version of the offering pool produced this decision. After a
+    # hot swap it is the only way to tell whether a routing change came
+    # from the pool or from the scoring.
+    registry_version: int = 0
     routing_profile: str | None = None
     routing_source: str | None = None
     request_id: str | None = None

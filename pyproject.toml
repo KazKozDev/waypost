@@ -24,7 +24,11 @@ rerank = ["sentence-transformers>=3.0"]
 compress = ["llmlingua>=0.2"]
 # Traffic-log clustering (scripts/cluster_logs.py).
 analysis = ["hdbscan>=0.8"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+# Shared quota, breaker and learned rate limits across replicas. Needed
+# only to run more than one instance: a single node keeps that state in
+# process, and the instance lock refuses a second one.
+cluster = ["redis>=5.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "redis>=5.0"]
 
 [project.scripts]
 waypost = "waypost.cli:main"

@@ -60,8 +60,10 @@ from .policy import Policy
 from .ensemble import fanout_ensemble, self_consistency_sample
 from .predictor import ModelQualityPredictor
 from .prefix import prefix_hash
+from .cluster import SharedState, connect as redis_connect
 from .latency import LatencyTracker
 from .ratelimit import RateGovernor
+from .selfupdate import ProbeTriggers, RegistryReloader, collect_triggers
 from .probe import apply_to_registry, latest as latest_probes
 from .probe import probe_all, store as store_probes, summarize_by_tier
 from .providers.openai_compat import OpenAICompatAdapter
@@ -86,6 +88,22 @@ def setup_logging(level: str) -> None:
     )
 
 
+def _pool_success(telemetry) -> tuple[int, float]:
+    """(attempts, success rate) across the whole pool over the last hour.
+
+    The reloader's rollback signal. Deliberately pool-wide: a swap that
+    hurts one offering but helps the pool is not a regression, and a swap
+    that quietly breaks routing shows up here regardless of which model
+    took the blame.
+    """
+    counts = telemetry.attempt_counts(window_s=3600)
+    total = sum(n for n, _ in counts.values())
+    if not total:
+        return 0, 0.0
+    ok = sum(n * rate for n, rate in counts.values())
+    return total, ok / total
+
+
 # --------------------------------------------------------------- lifespan
 
 
@@ -96,14 +114,26 @@ async def lifespan(app: FastAPI):
     setup_logging(settings.log_level)
     load_env()  # keys from .env → os.environ (the registry reads them)
 
+    # Shared state first: whether a second instance is safe depends on it.
+    shared = None
+    if settings.redis_url:
+        if (client := redis_connect(settings.redis_url)) is not None:
+            shared = SharedState(client, settings.redis_namespace)
+    app.state.shared = shared
+
     # AR-06: a second instance would split quota accounting. The lock is taken before
     # any SQLite opens, so a competitor cannot write anything in between.
+    # With a shared ledger that reason is gone — the counters no longer
+    # live in this process — so the lock steps aside for a cluster.
     lock = InstanceLock(settings.db_path.with_suffix(".lock"))
-    try:
-        lock.acquire()
-    except InstanceLockError as exc:
-        log.error(str(exc))
-        raise SystemExit(3) from exc
+    if shared is None:
+        try:
+            lock.acquire()
+        except InstanceLockError as exc:
+            log.error(str(exc))
+            raise SystemExit(3) from exc
+    else:
+        log.info("clustered: instance lock not taken, quota is shared")
     app.state.lock = lock
 
     registry = Registry.from_manifest(settings.manifest_path)
@@ -134,7 +164,7 @@ async def lifespan(app: FastAPI):
                 ", ".join(sorted(o.key for o in unknown)[:5]),
             )
 
-    ledger = Ledger(settings.db_path)
+    ledger = Ledger(settings.db_path, shared=shared)
     for o in registry.all():
         ledger.register(o)
 
@@ -142,14 +172,14 @@ async def lifespan(app: FastAPI):
     for key, rate in telemetry.success_rates().items():
         registry.apply_probe(key, success_rate=rate)
 
-    breaker = CircuitBreaker()
+    breaker = CircuitBreaker(shared=shared)
     bandit = Bandit(settings.db_path) if settings.enable_bandit else None
     # Shared between router and executor: the executor measures, the router
     # scores. Two copies would mean the router reading numbers nobody writes.
     latency = LatencyTracker()
     for o in registry.all():
         latency.seed(o.key, o.ttft_p50_ms)
-    rate_governor = RateGovernor(ledger)
+    rate_governor = RateGovernor(ledger, shared=shared)
     inflight: dict[str, int] = {}
     # A connection pool per process: TLS reuse noticeably cuts TTFT.
     client = httpx.AsyncClient(
@@ -261,15 +291,57 @@ async def lifespan(app: FastAPI):
     control = ControlPlane()
     app.state.control = control
 
+    triggers = ProbeTriggers()
+    app.state.triggers = triggers
+    app.state.executor.triggers = triggers
+
+    def _register_all(offerings):
+        # Buckets before traffic: a key that appears in the new pool must
+        # already have a quota when the first request reaches it.
+        for o in offerings:
+            ledger.register(o)
+
+    def _rebuild() -> list:
+        """The staging build: manifest + everything discovery has added.
+
+        Rebuilt from the manifest so a manifest edit is picked up, then
+        unioned with auto-discovered offerings so a reload does not undo
+        discovery. Learned runtime state is carried over by the registry.
+        """
+        fresh = Registry.from_manifest(settings.manifest_path).all()
+        known = {o.key for o in fresh}
+        fresh += [
+            o
+            for o in registry.all()
+            if o.key not in known
+            and o.free_source != pricing.Source.MANIFEST.value
+            or (o.key not in known and o.is_local)
+        ]
+        return fresh
+
+    reloader = RegistryReloader(
+        registry,
+        build=_rebuild,
+        success_rate=lambda: _pool_success(telemetry),
+        free_only=settings.free_only,
+        observe_window_s=settings.reload_observe_window_s,
+        on_swap=_register_all,
+    )
+    app.state.reloader = reloader
+
     async def job_discovery():
         results = await run_discovery(adapter, registry)
         app.state.discovery = results
         for r in results:
             if r.get("added"):
                 log.info("discovery %s: +%s", r["provider"], r["added"])
-                for o in registry.all():
-                    ledger.register(o)
-        return results
+        # Whatever discovery changed, apply it as one validated swap
+        # rather than as a stream of in-place mutations: a pool observed
+        # halfway through a rebuild is a pool nobody designed.
+        swap = app.state.reloader.reload()
+        if not swap.ok:
+            log.warning("registry reload rejected: %s", swap.reason)
+        return {"discovery": results, "reload": swap.__dict__}
 
     async def job_probe():
         # Three populations, not one:
@@ -318,11 +390,27 @@ async def lifespan(app: FastAPI):
             elif o.lifecycle == "active" and n >= 20 and rate < 0.80:
                 if registry.transition(o.key, "shadow", f"success rate {rate:.0%}"):
                     demoted.append(o.key)
+        # Out-of-band probes: a half-open provider no plan reaches, an
+        # offering whose latency drifted, one that just returned three
+        # errors in a row. The daily probe is too slow to react to any
+        # of those.
+        collect_triggers(triggers, registry, breaker, latency)
+        triggered = triggers.drain()
+        probed: list[str] = []
+        if triggered:
+            targets = [o for o in (registry.get(k) for k in triggered) if o is not None]
+            if targets:
+                results = await probe_all(adapter, targets, concurrency=2)
+                store_probes(settings.db_path, results)
+                apply_to_registry(registry, {r["key"]: r for r in results})
+                probed = [r["key"] for r in results]
+
         local_results = await discover_local_backends(adapter, registry)
         return {
             "updated": len(rates),
             "promoted": promoted,
             "demoted": demoted,
+            "triggered_probes": {k: triggered[k] for k in probed},
             "breakers": breaker.snapshot(),
             "rate_limits": rate_governor.snapshot(),
             "latency": latency.snapshot(),
@@ -350,8 +438,42 @@ async def lifespan(app: FastAPI):
     control.add(
         "health", job_health, settings.health_interval_min * 60, initial_delay_s=30.0
     )
+    async def job_cluster_sync():
+        """Pull cluster-wide counters into the local copies.
+
+        Admission is decided by the shared counter, on the call. Scoring
+        reads local state for every candidate of every request and must
+        not make a network hop to do it — so the local copy is refreshed
+        here instead, and is allowed to be a few seconds stale: it decides
+        preference, not permission.
+        """
+        if shared is None:
+            return {}
+        return {
+            "quota": ledger.sync_from_shared(),
+            "limits": rate_governor.sync_from_shared(registry.all()),
+            "redis": shared.snapshot(),
+        }
+
     control.add(
         "purge", job_purge, settings.purge_interval_h * 3600, initial_delay_s=300.0
+    )
+    control.add(
+        "cluster",
+        job_cluster_sync,
+        settings.cluster_sync_interval_s,
+        initial_delay_s=5.0,
+        enabled=shared is not None,
+    )
+    async def job_reload():
+        return app.state.reloader.reload().__dict__
+
+    control.add(
+        "reload",
+        job_reload,
+        settings.reload_interval_h * 3600,
+        initial_delay_s=600.0,
+        enabled=settings.enable_hot_reload,
     )
     control.start()
 
@@ -373,7 +495,11 @@ async def lifespan(app: FastAPI):
             await worker.stop()
         if app.state.embeddings is not None:
             await app.state.embeddings.aclose()
-        app.state.lock.release()
+        if shared is None:
+            app.state.lock.release()
+        ledger.close()
+        if bandit is not None:
+            bandit.close()
         await client.aclose()
 
 
@@ -823,6 +949,7 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
                 except Exception as exc:  # noqa: BLE001
                     log.debug("fanout escalation failed: %s", exc)
 
+    meta.registry_version = app.state.registry.version
     app.state.router.remember(req.session_id, f"{meta.provider}/{meta.model}", prefix)
 
     elapsed = (time.perf_counter() - t0) * 1000
@@ -2349,6 +2476,44 @@ async def run_job(name: str):
     return {"job": name, "result": result}
 
 
+@app.post("/v1/registry/reload")
+async def reload_registry(payload: dict = Body(default_factory=dict)):
+    """Rebuild the pool from the manifest plus discovery, validate it, and
+    swap it in. Refused — not half-applied — when an invariant fails."""
+    observe = bool(payload.get("observe", True))
+    result = app.state.reloader.reload(observe=observe)
+    return {"ok": result.ok, **result.__dict__}
+
+
+@app.post("/v1/registry/rollback")
+async def rollback_registry(payload: dict = Body(default_factory=dict)):
+    result = app.state.reloader.rollback(payload.get("reason") or "manual")
+    return {"ok": result.ok, **result.__dict__}
+
+
+@app.get("/v1/registry")
+async def registry_state():
+    registry = app.state.registry
+    return {
+        **app.state.reloader.snapshot(),
+        "offerings": [
+            {
+                "key": o.key,
+                "lifecycle": o.lifecycle,
+                "usable": o.usable,
+                "free": o.free,
+                "tier": o.tier.value,
+                "ttft_p50_ms": o.ttft_p50_ms,
+                "success_rate": round(o.success_rate, 3),
+                "dead_streak": o.dead_streak,
+                "miss_streak": o.miss_streak,
+            }
+            for o in registry.all()
+        ],
+        "pending_probes": app.state.triggers.pending(),
+    }
+
+
 def _build_stats_payload() -> dict:
     registry = app.state.registry
     pool: dict[str, int] = {}
@@ -2363,6 +2528,10 @@ def _build_stats_payload() -> dict:
         "rate_limits": app.state.rate_governor.snapshot(),
         "inflight": dict(app.state.inflight),
         "pool": pool,
+        "registry_version": registry.version,
+        "cluster": app.state.shared.snapshot()
+        if app.state.shared is not None
+        else {"backend": "in-process"},
         "cache_hit_rate": round(app.state.cache.hit_rate(), 3),
         "semantic_hit_rate": round(app.state.semantic.hit_rate(), 3),
         "bandit": app.state.bandit.snapshot() if app.state.bandit else {},

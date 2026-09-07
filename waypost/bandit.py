@@ -49,6 +49,7 @@ class Bandit:
         self.max_evidence = max_evidence
         self._lock = threading.Lock()
         self._db_path = Path(db_path) if db_path else None
+        self._conn_cache: sqlite3.Connection | None = None
         if self._db_path:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             self._init_db()
@@ -56,9 +57,19 @@ class Bandit:
 
     # ---------------------------------------------------------------- db
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
+        """Reused, like the ledger's: update() runs once per answer."""
+        conn = self._conn_cache
+        if conn is None:
+            conn = sqlite3.connect(self._db_path, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn_cache = conn
         return conn
+
+    def close(self) -> None:
+        conn, self._conn_cache = self._conn_cache, None
+        if conn is not None:
+            conn.close()
 
     def _init_db(self) -> None:
         with self._conn() as c:

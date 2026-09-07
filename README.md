@@ -145,6 +145,76 @@ Two failure contours, deliberately separate:
 Neither of them touches the bandit. Its reward is the **verifier's
 verdict** — a 200 carrying malformed JSON is not a success.
 
+## The pool updates itself
+
+Discovery finds new free models, probing measures them, providers retire
+things. Applying that used to mean a restart (losing the ledger, the
+bandit and every breaker state) or mutating the live registry entry by
+entry, where a half-applied change is a pool nobody designed.
+
+```
+detect → validate → stage → swap → observe → roll back if worse
+```
+
+The staging build is refused — not half-applied — when it would leave
+the router without a local fallback, without a tier, without a
+tool-capable model, or suddenly at half its size (the shape of a provider
+returning a truncated `/models` page). What passes is swapped in by
+rebinding one reference, so requests already in flight finish against the
+pool they were planned on, and `registry_version` in the response says
+which pool decided.
+
+Invariants only catch what someone thought to check, so the reloader
+watches the error rate for ten minutes afterwards and puts the previous
+pool back if it regressed. The last three versions are kept for exactly
+that.
+
+Offerings have a lifecycle rather than an on/off switch:
+
+```
+discovered → candidate → (probe) → shadow → (50 requests at ≥90%) → active
+                                      ↑                                │
+              quarantine ←────────────┴──── 2 dead probes / gone 3x ───┘
+                   └── one resurrection probe a day ──┘
+```
+
+Probes also run out of band, because a daily schedule cannot react: a
+provider sitting in half-open that no plan happens to reach, an offering
+whose latency drifted past 2.5x its own baseline, or one that just
+returned three errors in a row.
+
+```bash
+curl localhost:8080/v1/registry              # pool, versions, pending probes
+curl -XPOST localhost:8080/v1/registry/reload
+curl -XPOST localhost:8080/v1/registry/rollback
+```
+
+## More than one replica
+
+By default a second instance is refused: `InstanceLock` exists because
+two processes each tracking "20 of 30 rpm used" will happily send 40.
+That is an honest default for a single node, but it is a wall rather than
+an answer.
+
+```bash
+pip install -e ".[cluster]"
+export ROUTER_REDIS_URL=redis://localhost:6379/0
+```
+
+With that set, the three counters that only mean anything if every
+replica agrees on them — the quota ledger, the circuit breaker, the
+learned rate limits — move to Redis, and the instance lock steps aside.
+Every mutation is a single server-side Lua script, so "check the
+remaining quota and take a slot" cannot interleave between replicas, and
+the breaker threshold is counted once for the cluster instead of once per
+replica. Everything else (bandit posteriors, latency EMAs, the registry)
+stays per-replica: it converges, and disagreement costs a little routing
+quality rather than a burst of 429s.
+
+If Redis goes away the router keeps serving from its local counters and
+says so in the log. A quota counter that cannot be read is a reason to be
+slightly over budget, never a reason to stop.
+
 ## API extensions
 
 On top of the OpenAI spec (not forwarded to providers):
@@ -409,7 +479,8 @@ per provider), `waypost_quota_remaining`, `waypost_breaker_state`,
 `waypost_latency_ema_ms` and `waypost_latency_drift_ratio` (a ratio above
 ~2.5 is a provider degrading while still answering 200),
 `waypost_learned_rpm`, `waypost_inflight`, `waypost_pool_size` by
-lifecycle state.
+lifecycle state. `/v1/stats` also carries `registry_version` and whether
+state is shared or in-process.
 
 The terminal logs say what happened:
 
@@ -485,7 +556,12 @@ a canceled hedge returns the quota, the local model does not run two
 generations at once, planning does not consume the breaker's half-open
 probe token, a 429 does not open the breaker while a 5xx does, the ladder
 respects its deadline and still reaches the local fallback, a model is
-quarantined only after two dead probes and can come back from it.
+quarantined only after two dead probes and can come back from it, a
+reload that would break an invariant is refused outright, a reload that
+passes but routes worse rolls itself back. The cluster tests run against
+a real Redis and skip without one — a distributed counter tested only
+against a mock is one whose whole reason for existing, what happens when
+two writers race, was never tested.
 
 ## Installing extras
 

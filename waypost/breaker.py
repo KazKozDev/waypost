@@ -34,6 +34,9 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import Any
+
+from .cluster import PROBE_BUSY, PROBE_CLOSED
 
 
 @dataclass
@@ -47,10 +50,16 @@ class _State:
 @dataclass(frozen=True)
 class ProbeToken:
     """Handle for a half-open probe. Returned by acquire_probe(), and must
-    reach release_probe() on every path that does not resolve it."""
+    reach release_probe() on every path that does not resolve it.
+
+    started_at < 0 is the sentinel for "another caller holds the token":
+    the candidate must be skipped. In a cluster the token is a string
+    minted by Redis, kept verbatim so it can be compared exactly.
+    """
 
     provider: str
     started_at: float
+    remote: str | None = None
 
 
 class CircuitBreaker:
@@ -61,6 +70,7 @@ class CircuitBreaker:
         base_cooldown_s: float = 30.0,
         max_cooldown_s: float = 600.0,
         probe_ttl_s: float = 300.0,
+        shared: "Any | None" = None,
     ):
         self.threshold = threshold
         self.window_s = window_s
@@ -70,6 +80,10 @@ class CircuitBreaker:
         # assumed lost (a crashed task, a cancelled request). The last
         # line of defence against the token leak described above.
         self.probe_ttl_s = probe_ttl_s
+        # Cross-replica health, when configured. A provider one replica
+        # found to be down is down for all of them; rediscovering that
+        # separately costs a real request per replica.
+        self.shared = shared
         self._states: dict[str, _State] = {}
         self._lock = threading.Lock()
 
@@ -87,6 +101,9 @@ class CircuitBreaker:
         return True
 
     def state(self, provider: str) -> str:
+        if self.shared is not None:
+            if (remote := self.shared.breaker_state(provider)) is not None:
+                return remote
         with self._lock:
             s = self._get(provider)
             if s.opened_at == 0.0:
@@ -100,7 +117,9 @@ class CircuitBreaker:
         """Pure check: may this provider be considered at all?
 
         Called during planning, possibly many times per request. It must
-        not mutate anything the executor depends on.
+        not mutate anything the executor depends on — and, for the same
+        reason, it must not make a network call: the shared state is
+        consulted at acquire_probe(), on the one call that matters.
         """
         with self._lock:
             s = self._get(provider)
@@ -123,6 +142,19 @@ class CircuitBreaker:
         lost the race and must skip the candidate, which can_admit() could
         not know at planning time.
         """
+        if self.shared is not None:
+            got = self.shared.acquire_probe(
+                provider, self.probe_ttl_s, self.base_cooldown_s
+            )
+            if got is not None:
+                # One probe for the whole cluster: the replica that wins
+                # the token calls, the others skip the candidate.
+                if got == PROBE_CLOSED:
+                    return None
+                if got == PROBE_BUSY:
+                    return ProbeToken(provider, -1.0)
+                return ProbeToken(provider, float(got), remote=got)
+            # Redis unreachable — decide locally rather than stall.
         with self._lock:
             s = self._get(provider)
             now = time.time()
@@ -148,6 +180,8 @@ class CircuitBreaker:
         """
         if token is None or token.started_at < 0.0:
             return
+        if self.shared is not None and token.remote is not None:
+            self.shared.release_probe(token.provider, token.remote)
         with self._lock:
             s = self._get(token.provider)
             if s.probe_started_at == token.started_at:
@@ -155,6 +189,8 @@ class CircuitBreaker:
 
     # ------------------------------------------------------------ verdicts
     def on_success(self, provider: str) -> None:
+        if self.shared is not None:
+            self.shared.on_success(provider)
         with self._lock:
             s = self._get(provider)
             s.failures.clear()
@@ -167,6 +203,17 @@ class CircuitBreaker:
 
         A 429 must never reach this method — see the module docstring.
         """
+        if self.shared is not None:
+            # The threshold is counted once across the cluster, not once
+            # per replica: with four replicas a local threshold of four
+            # means sixteen failed requests before anyone opens.
+            self.shared.on_failure(
+                provider,
+                window_s=self.window_s,
+                threshold=self.threshold,
+                base_cooldown_s=self.base_cooldown_s,
+                max_cooldown_s=self.max_cooldown_s,
+            )
         with self._lock:
             s = self._get(provider)
             now = time.time()

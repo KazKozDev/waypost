@@ -27,6 +27,7 @@ import logging
 import random
 import time
 import uuid
+from collections import deque
 from typing import Any, AsyncIterator
 
 from . import pricing
@@ -185,6 +186,8 @@ class Executor:
         rate_governor: RateGovernor | None = None,
         inflight: dict[str, int] | None = None,
         deadlines: dict[str, float] | None = None,
+        hedge_window_s: float = 300.0,
+        triggers: Any | None = None,
     ):
         self.adapter = adapter
         self.ledger = ledger
@@ -195,6 +198,11 @@ class Executor:
         self.rate_governor = rate_governor or RateGovernor(ledger)
         self.inflight = inflight if inflight is not None else {}
         self.deadlines = deadlines or dict(DEADLINE_S)
+        # ProbeTriggers, if the control plane is running. A run of server
+        # errors is worth re-measuring now rather than at the next daily
+        # probe, by which time the model may be long gone.
+        self.triggers = triggers
+        self._error_runs: dict[str, int] = {}
         self.verifier = verifier or Verifier()
         self.max_attempts = max_attempts
         self.timeout_s = timeout_s
@@ -214,6 +222,10 @@ class Executor:
         # Fire-and-forget exploration tasks: asyncio only holds a weak
         # reference, so without this set they can be collected mid-flight.
         self._background: set[asyncio.Task] = set()
+        # Sliding window for the hedge budget — see _hedge_allowed().
+        self.hedge_window_s = hedge_window_s
+        self._req_times: deque[float] = deque()
+        self._hedge_times: deque[float] = deque()
 
     # ------------------------------------------------------------ deadline
     def budget_for(self, req: ChatRequest) -> float:
@@ -234,6 +246,22 @@ class Executor:
         """
         if self.bandit is not None:
             self.bandit.update(profile.task_class, o.key, 1.0 if ok else 0.0)
+
+    ERROR_RUN_TRIGGER = 3
+
+    def _note_error_run(self, o: Offering) -> None:
+        """Three server errors in a row from one offering: ask for a probe.
+
+        Not a breaker decision — that one is per provider and about
+        admission. This is per model and about knowledge: the model may
+        have been retired, or lost a capability, and only a canary can
+        tell the difference from a bad afternoon.
+        """
+        n = self._error_runs.get(o.key, 0) + 1
+        self._error_runs[o.key] = n
+        if n >= self.ERROR_RUN_TRIGGER and self.triggers is not None:
+            self.triggers.request(o.key, f"{n} consecutive errors")
+            self._error_runs[o.key] = 0
 
     def _enter(self, o: Offering) -> None:
         self.inflight[o.key] = self.inflight.get(o.key, 0) + 1
@@ -368,7 +396,18 @@ class Executor:
                 offering=o,
                 key_index=key_index,
             )
-        self.ledger.reserve(o, est, key_index)
+        if not self.ledger.reserve(o, est, key_index):
+            # A shared ledger refused: another replica took the last slot
+            # between planning and calling. Skip without spending the
+            # request — that refusal is exactly what it exists to prevent.
+            self.breaker.release_probe(probe)
+            return Attempt(
+                error=ProviderError(
+                    Verdict.SWITCH, 429, "quota taken by another replica", 5.0
+                ),
+                offering=o,
+                key_index=key_index,
+            )
         t0 = time.perf_counter()
         sem = self._slot(o)
         modality, img_cnt, aud_dur, vis_bud = _detect_modality(req)
@@ -536,6 +575,7 @@ class Executor:
         )
         self.breaker.on_success(o.provider)  # also clears the probe token
         self.rate_governor.on_success(o, key_index)
+        self._error_runs.pop(o.key, None)
         latency = (time.perf_counter() - t0) * 1000
         self.latency.observe(o.key, latency)
         self.telemetry.log_attempt(
@@ -704,6 +744,7 @@ class Executor:
                     break  # this key is out — try the next
                 # RETRY: 5xx, timeouts, connection errors. Health signal.
                 self.breaker.on_failure(o.provider)
+                self._note_error_run(o)
                 if attempt + 1 < self.retries_per_provider:
                     await self._backoff(attempt, deadline)
         return last or Attempt(
@@ -727,13 +768,26 @@ class Executor:
 
     def _hedge_allowed(self, req: ChatRequest) -> bool:
         """A hedge is a second quota spend. Allowed for interactive and
-        only within budget: 5% of requests, no more."""
+        only within budget: 5% of requests, no more.
+
+        Measured over a sliding window, not over the life of the process.
+        A router that has been up for a week accumulates so many requests
+        in the denominator that the ratio stops moving: a burst of hedges
+        right now barely dents it, and the budget silently stops being a
+        budget.
+        """
         if not self.enable_hedging or req.latency_class != "interactive":
             return False
-        done = self._counters["requests"]
+        now = time.monotonic()
+        cutoff = now - self.hedge_window_s
+        while self._req_times and self._req_times[0] < cutoff:
+            self._req_times.popleft()
+        while self._hedge_times and self._hedge_times[0] < cutoff:
+            self._hedge_times.popleft()
+        done = len(self._req_times)
         if done < 20:  # too early to judge the share
-            return self._counters["hedges"] == 0
-        return self._counters["hedges"] / done < self.hedge_budget
+            return not self._hedge_times
+        return len(self._hedge_times) / done < self.hedge_budget
 
     async def _call_with_hedge(
         self,
@@ -766,6 +820,7 @@ class Executor:
             return primary.result()
 
         self._counters["hedges"] += 1
+        self._hedge_times.append(time.monotonic())
         log.info(
             "HEDGE %s silent > %.1fs → in parallel %s",
             o.key,
@@ -840,6 +895,7 @@ class Executor:
 
         started = time.perf_counter()
         self._counters["requests"] += 1
+        self._req_times.append(time.monotonic())
         candidates = plan[: self.max_attempts]
         last: ProviderError | None = None
         # One budget for the whole ladder, not per attempt. Descending the
@@ -951,7 +1007,8 @@ class Executor:
                 continue
             meta.attempts += 1
             meta.fallback_path.append(o.key)
-            self.ledger.reserve(o, est, key_index)
+            if not self.ledger.reserve(o, est, key_index):
+                continue  # another replica took the last slot
             first_byte_sent = False
             ttft_budget = self.timeout_s if o.is_local else max(25.0, self._hedge_delay(o) * 5)
             t0 = time.perf_counter()
@@ -1062,9 +1119,9 @@ class Executor:
             "explorations": self._counters["explorations"],
             "inflight": dict(self.inflight),
             "rate_limits": self.rate_governor.snapshot(),
-            "hedge_rate": round(
-                self._counters["hedges"] / self._counters["requests"], 3
-            )
-            if self._counters["requests"]
+            # Over the window the budget actually governs, not over uptime.
+            "hedge_rate": round(len(self._hedge_times) / len(self._req_times), 3)
+            if self._req_times
             else 0.0,
+            "hedge_window_s": self.hedge_window_s,
         }
