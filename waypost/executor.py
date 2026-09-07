@@ -584,6 +584,7 @@ class Executor:
                 outcome=outcome,
                 outcome_source=outcome_source,
                 outcome_detail=outcome_detail,
+                arm=meta.arm if meta else "",
             )
             self.telemetry.log_attempt_row(entry)
             log.warning("attempt %s[key%d] failed: %s", o.key, key_index, exc)
@@ -668,6 +669,7 @@ class Executor:
             outcome=outcome,
             outcome_source=outcome_source,
             outcome_detail=outcome_detail,
+            arm=meta.arm if meta else "",
         )
         self.telemetry.log_attempt_row(entry)
 

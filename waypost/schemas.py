@@ -117,6 +117,10 @@ class RouterMeta(BaseModel):
     # 504 readable: the client can see it was cut off, not that every
     # provider refused.
     deadline_s: float = 0.0
+    # A vision model read the attachment, a text model answered about it.
+    decomposed: bool = False
+    # Which routing-policy arm this request was assigned to, if any.
+    arm: str = ""
     stakes: str | None = None
     stakes_reason: str | None = None
     # Which version of the offering pool produced this decision. After a

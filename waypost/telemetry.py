@@ -60,6 +60,8 @@ class AttemptLogEntry:
     outcome: str = "pass"  # pass | fail | unknown
     outcome_source: str = "hard_check"  # hard_check | user_signal | judge | manual
     outcome_detail: dict[str, Any] = field(default_factory=dict)
+    # Routing policy arm, when an experiment is running.
+    arm: str = ""
 
 
 def _serialize_embedding(emb: list[float] | np.ndarray | bytes | None) -> bytes | None:
@@ -196,11 +198,21 @@ class Telemetry:
         ("usage_measured", "INTEGER DEFAULT 0"),
     )
 
+    # Which policy arm a request belonged to. A column on attempt_log
+    # rather than a side table, so comparing arms is a GROUP BY over rows
+    # that are written anyway — an experiment costs a field, not a
+    # pipeline.
+    _ATTEMPT_LOG_COLUMNS = (("arm", "TEXT DEFAULT ''"),)
+
     def _migrate(self, c: sqlite3.Connection) -> None:
         have = {r[1] for r in c.execute("PRAGMA table_info(attempts)")}
         for name, decl in self._EXTRA_COLUMNS:
             if name not in have:
                 c.execute(f"ALTER TABLE attempts ADD COLUMN {name} {decl}")
+        have_log = {r[1] for r in c.execute("PRAGMA table_info(attempt_log)")}
+        for name, decl in self._ATTEMPT_LOG_COLUMNS:
+            if name not in have_log:
+                c.execute(f"ALTER TABLE attempt_log ADD COLUMN {name} {decl}")
         # Older non-streaming rows already contain provider-reported total
         # tokens. Preserve that useful coverage without pretending that the
         # unavailable input/output split can be reconstructed exactly.
@@ -421,6 +433,29 @@ class Telemetry:
                 }
             )
         return out
+
+    def experiment_rows(
+        self, window_s: float = 7 * 86_400, limit: int = 50_000
+    ) -> list[dict[str, Any]]:
+        """Final attempts with the arm they belonged to."""
+        since = time.time() - window_s
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT arm, outcome, latency_ms, attempt_no, model, provider "
+                "FROM attempt_log WHERE ts > ? AND is_final = 1 "
+                "ORDER BY ts DESC LIMIT ?",
+                (since, limit),
+            ).fetchall()
+        return [
+            {
+                "arm": r[0] or "control",
+                "outcome": r[1],
+                "latency_ms": r[2],
+                "attempt_no": r[3],
+                "offering": f"{r[5]}/{r[4]}",
+            }
+            for r in rows
+        ]
 
     def attempt_counts(self, window_s: float = 86_400) -> dict[str, tuple[int, float]]:
         """(attempts, success rate) per offering.
@@ -662,6 +697,7 @@ class Telemetry:
             entry.outcome,
             entry.outcome_source,
             json.dumps(entry.outcome_detail, ensure_ascii=False),
+            entry.arm,
         )
         with self._lock, self._conn() as c:
             c.execute(
@@ -674,8 +710,8 @@ class Telemetry:
                     quota_remaining_pct, quota_window_reset_in_s, quota_binding_limit,
                     status, error_class, latency_ms, ttft_ms, output_tokens,
                     reasoning_tokens, peak_memory_mb, is_final, outcome, outcome_source,
-                    outcome_detail
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    outcome_detail, arm
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
                 row,
             )

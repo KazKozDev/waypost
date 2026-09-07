@@ -49,6 +49,11 @@ from .classify import classify, classify_l0
 from .compress import Compressor
 from .config import Settings, load_env
 from .control import ControlPlane
+from .decompose import (
+    analyze_multimodal_decomposition,
+    decomposition_gain,
+    strip_images,
+)
 from .discovery import discover_local_backends, run_discovery
 from .embeddings import EmbeddingService
 from .executor import Executor
@@ -62,6 +67,7 @@ from .ensemble import fanout_ensemble, self_consistency_sample
 from .predictor import ModelQualityPredictor
 from .prefix import prefix_hash
 from .cluster import SharedState, connect as redis_connect
+from .experiment import Arm, Experiment, ExperimentRegistry, compare as compare_arms
 from .feedback import FeedbackCollector, Signal
 from .latency import LatencyTracker
 from .neighbors import NeighborIndex
@@ -89,6 +95,92 @@ def setup_logging(level: str) -> None:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+
+
+async def _maybe_decompose(
+    req: ChatRequest, profile: RequestProfile, meta: RouterMeta
+) -> ChatRequest | None:
+    """Let a vision model read the image, and a text model do the thinking.
+
+    The free vision pool is small and weak; the free text pool is large.
+    A hard question about a diagram routed end-to-end gets whichever
+    vision model is available, which may be the worst model in the pool.
+    Splitting the request lets a cheap vision model describe the image and
+    the best text model reason about the description.
+
+    It is not always a win. The split costs a second call and, more
+    importantly, loses whatever the description failed to mention — so it
+    is refused for deictic prompts ("what is circled here"), which cannot
+    survive losing the image, and for cases where a vision model is
+    strong enough to carry the task itself.
+    """
+    if not settings.enable_decomposition:
+        return None
+    task = analyze_multimodal_decomposition(req)
+    if not task.is_separable or task.stage != "extraction_first":
+        return None
+
+    router = app.state.router
+    plan = router.plan(req, profile, limit=2)
+    if not plan:
+        return None
+    best_vision = plan[0]
+
+    # What the same question could be routed to once the image is gone.
+    text_probe = strip_images(req, "")
+    text_plan = router.plan(text_probe, profile, limit=2)
+    if not text_plan:
+        return None
+    if not decomposition_gain(best_vision.score, text_plan[0].score):
+        return None
+
+    extraction = req.model_copy(
+        update={
+            "messages": [
+                ChatMessage(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": task.extraction_prompt or ""},
+                        *[
+                            b
+                            for m in req.messages
+                            if isinstance(m.content, list)
+                            for b in m.content
+                            if isinstance(b, dict)
+                            and b.get("type") in ("image_url", "image")
+                        ],
+                    ],
+                )
+            ],
+            "stream": False,
+            "tools": None,
+            "response_format": None,
+        }
+    )
+    try:
+        stage_meta = RouterMeta(request_id=f"{meta.request_id}-extract")
+        resp = await app.state.executor.execute(
+            extraction, profile, [best_vision], stage_meta
+        )
+    except Exception as exc:  # noqa: BLE001 — fall back to end-to-end
+        log.info("decompose: extraction failed (%s) → single shot", exc)
+        return None
+
+    text = ""
+    for choice in resp.choices:
+        text = (choice.get("message") or {}).get("content") or ""
+        break
+    if not text.strip():
+        return None
+
+    meta.decomposed = True
+    meta.fallback_path.append(f"{stage_meta.provider}/{stage_meta.model}:extract")
+    log.info(
+        "DECOMPOSE %s read the image (%d chars) → text pool",
+        best_vision.offering.key,
+        len(text),
+    )
+    return strip_images(req, text)
 
 
 def _maybe_shadow(req: ChatRequest, profile: RequestProfile) -> None:
@@ -271,6 +363,21 @@ async def lifespan(app: FastAPI):
     app.state.predictor = predictor
     if predictor.is_trained:
         log.info("predictor: %d model(s) with trained weights", len(predictor.weights))
+    # Routing policy experiments. Empty by default: an experiment nobody
+    # asked for is just noise in the log.
+    experiments = ExperimentRegistry()
+    if settings.experiment_stochastic:
+        experiments.add(
+            Experiment(
+                "stochastic-vs-argmax",
+                [
+                    Arm("argmax", {"stochastic_routing": False}),
+                    Arm("thompson", {"stochastic_routing": True}),
+                ],
+            )
+        )
+    app.state.experiments = experiments
+
     app.state.feedback = FeedbackCollector(
         telemetry, bandit, enabled=settings.enable_feedback
     )
@@ -702,6 +809,15 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
         meta.request_id = f"req_{uuid.uuid4().hex[:12]}"
     metrics: Metrics = app.state.metrics
 
+    # Which policy arm this request belongs to. Keyed on the session so a
+    # conversation stays whole: flipping mid-way measures neither arm and
+    # destroys the prefix stickiness both of them rely on.
+    arms = app.state.experiments.assignments(req.session_id or meta.request_id)
+    meta.arm = "+".join(sorted(f"{k}:{v}" for k, v in arms.items())) if arms else ""
+    overrides = app.state.experiments.overrides(req.session_id or meta.request_id)
+    if "stochastic_routing" in overrides:
+        app.state.router.stochastic = bool(overrides["stochastic_routing"])
+
     # This request is also a verdict on the previous one. A regeneration,
     # a "no, not like that", or simply carrying on — the only quality
     # signal that exists for free-form text, where the verifier has
@@ -751,6 +867,16 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
     meta.task_class = profile.task_class
     meta.complexity_tier = profile.tier.value
     meta.classifier_source = profile.classifier_source
+
+    # Multimodal split, before the caches: the cache key of the rewritten
+    # text request is the one worth reusing, and it is shared with every
+    # other request that arrives at the same description.
+    if (rewritten := await _maybe_decompose(req, profile, meta)) is not None:
+        req = rewritten
+        fresh = classify_l0(req)
+        profile.est_input_tokens = fresh.est_input_tokens
+        profile.est_output_tokens = fresh.est_output_tokens
+        profile.required_caps = fresh.required_caps
 
     # L0: exact cache. Cheaper than any routing, so before it.
     key = canonical_key(req, model_class=profile.tier.value)
@@ -2643,6 +2769,21 @@ async def reload_registry(payload: dict = Body(default_factory=dict)):
 async def rollback_registry(payload: dict = Body(default_factory=dict)):
     result = app.state.reloader.rollback(payload.get("reason") or "manual")
     return {"ok": result.ok, **result.__dict__}
+
+
+@app.get("/v1/experiments")
+async def experiments_endpoint(window_h: float = 168.0):
+    """Which arms are running, and what each one cost.
+
+    Read the sample sizes first. Two arms differing by three points over
+    ninety requests differ by nothing.
+    """
+    rows = app.state.telemetry.experiment_rows(window_s=window_h * 3600)
+    return {
+        "running": app.state.experiments.snapshot(),
+        "window_h": window_h,
+        "results": compare_arms(rows),
+    }
 
 
 @app.get("/v1/registry")

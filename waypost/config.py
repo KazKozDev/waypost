@@ -30,7 +30,14 @@ def load_env(env_file: str | Path = ".env") -> None:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="ROUTER_", env_file=".env", extra="ignore"
+        env_prefix="ROUTER_",
+        # Which env file to read. Overridable so that a deployment can
+        # point at its own, and — the reason it exists — so the test
+        # suite can point at nothing. A test whose result depends on an
+        # untracked file in the developer's working copy is not a test:
+        # it passes here and fails there for reasons no one can see.
+        env_file=os.environ.get("ROUTER_ENV_FILE", ".env"),
+        extra="ignore",
     )
 
     host: str = "127.0.0.1"
@@ -74,6 +81,17 @@ class Settings(BaseSettings):
     # rows, where the regression is still noise.
     enable_neighbors: bool = True
     neighbor_capacity: int = 5000
+
+    # Routing policy A/B. Off by default: an experiment nobody asked for
+    # is noise in the log. Turn one on to replace an argument with a
+    # number — GET /v1/experiments reports what each arm cost.
+    experiment_stochastic: bool = False
+
+    # Multimodal decomposition: a vision model describes the attachment,
+    # the (much larger and stronger) text pool reasons about the
+    # description. Only where the gap is worth a second call, and never
+    # for prompts that point at the image.
+    enable_decomposition: bool = True
 
     # Counterfactual evidence: ask a model we did not pick, but only
     # where the user is not waiting — a cache hit or a batch job. Learning

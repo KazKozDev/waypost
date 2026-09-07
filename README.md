@@ -209,6 +209,38 @@ higher instead. Only where the neighbourhood is both confident and
 pessimistic: raising the tier on two anecdotes would surrender the saving
 the cascade exists for.
 
+## Replacing an argument with a number
+
+Every knob here was set by an argument. Some of those arguments were
+good; none of them were measured. Routing policies can be A/B'd against
+each other, assigned by a hash of the session — so a conversation stays
+in one arm, assignment survives a restart, and replicas split
+identically. The arm is a column on the attempt log, so comparing them is
+a `GROUP BY` over rows written anyway.
+
+```bash
+ROUTER_EXPERIMENT_STOCHASTIC=true       # Thompson vs argmax
+curl localhost:8080/v1/experiments      # what each arm cost
+```
+
+The report gives success rate, p50/p95 latency, attempts per request and
+escalation rate — and the sample size, which is the number to read first.
+No significance testing: with a few hundred requests a p-value would be
+theatre.
+
+## Letting a weak pool borrow a strong one
+
+The free vision pool is small and weak; the free text pool is large. A
+hard question about a diagram routed end-to-end gets whichever vision
+model is available, which may be the worst model in the pool. So the
+request is split: a cheap vision model describes the image, and the best
+text model reasons about the description.
+
+Refused where it would not pay — for deictic prompts ("what is circled
+here"), which cannot survive losing the image, and wherever a vision
+model is strong enough to carry the task itself. The split costs a second
+call and loses whatever the description failed to mention.
+
 ## What the router did not choose
 
 Every outcome it learns from is the outcome of the model it picked;

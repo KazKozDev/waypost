@@ -95,6 +95,56 @@ def analyze_multimodal_decomposition(req: ChatRequest) -> DecomposedTask:
     return DecomposedTask(is_separable=False, stage="single_shot")
 
 
+def strip_images(req: ChatRequest, extracted: str) -> ChatRequest:
+    """Replace visual content with what the extraction stage read out of it.
+
+    The image blocks are removed rather than kept alongside the text: the
+    whole point is to hand the second stage to a model that has no vision
+    at all, and leaving the blocks in would filter that pool right back
+    out.
+    """
+    messages = []
+    for m in req.messages:
+        if not isinstance(m.content, list):
+            messages.append(m)
+            continue
+        kept = [
+            b
+            for b in m.content
+            if not (
+                isinstance(b, dict)
+                and b.get("type") in ("image_url", "image", "input_audio", "audio")
+            )
+        ]
+        text = " ".join(
+            b.get("text", "") for b in kept if isinstance(b, dict)
+        ).strip()
+        if m.role == "user":
+            text = (
+                f"{text}\n\n[Содержимое вложения, распознанное на первом шаге]\n"
+                f"{extracted}"
+            ).strip()
+        messages.append(m.model_copy(update={"content": text}))
+    return req.model_copy(update={"messages": messages})
+
+
+def decomposition_gain(
+    best_vision_quality: float, best_text_quality: float, margin: float = 0.12
+) -> bool:
+    """Is splitting worth a second call?
+
+    Decomposition buys reasoning power and pays for it twice: an extra
+    request against the quota, extra latency, and — the real cost —
+    whatever the extraction stage failed to notice. A description is
+    lossy in a way the original image is not.
+
+    So it only pays when the text pool is *substantially* stronger than
+    the vision pool. Where a vision model can carry the task itself,
+    end-to-end is both cheaper and more faithful.
+    """
+    return best_text_quality - best_vision_quality >= margin
+
+
 def get_vision_token_budget(task_class: str) -> int:
     """Returns the explicit vision token budget based on task type (Spec I.2).
 
