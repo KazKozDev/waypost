@@ -411,10 +411,13 @@ class Executor:
         t0 = time.perf_counter()
         sem = self._slot(o)
         modality, img_cnt, aud_dur, vis_bud = _detect_modality(req)
-        req_id = (
-            (meta.request_id if meta and meta.request_id else None)
-            or req.session_id
-            or f"req_{uuid.uuid4().hex[:8]}"
+        # Never fall back to session_id. attempt_log is keyed on
+        # (request_id, attempt_no) and written with INSERT OR REPLACE, so
+        # a session id shared by every request in a conversation makes
+        # each one overwrite the last — silently destroying exactly the
+        # rows the predictor is trained on.
+        req_id = (meta.request_id if meta and meta.request_id else None) or (
+            f"req_{uuid.uuid4().hex[:12]}"
         )
         if meta and not meta.request_id:
             meta.request_id = req_id

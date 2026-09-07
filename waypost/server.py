@@ -61,7 +61,9 @@ from .ensemble import fanout_ensemble, self_consistency_sample
 from .predictor import ModelQualityPredictor
 from .prefix import prefix_hash
 from .cluster import SharedState, connect as redis_connect
+from .feedback import FeedbackCollector, Signal
 from .latency import LatencyTracker
+from .neighbors import NeighborIndex
 from .ratelimit import RateGovernor
 from .selfupdate import ProbeTriggers, RegistryReloader, collect_triggers
 from .probe import apply_to_registry, latest as latest_probes
@@ -236,8 +238,20 @@ async def lifespan(app: FastAPI):
             inflight=inflight,
         )
     )
-    predictor = ModelQualityPredictor()
+    neighbors = NeighborIndex(capacity=settings.neighbor_capacity)
+    if settings.enable_neighbors:
+        # Warm from the log: the index is useful from the first request
+        # after a restart rather than after the next few hundred.
+        neighbors.load(telemetry.training_rows(limit=settings.neighbor_capacity))
+    app.state.neighbors = neighbors
+
+    predictor = ModelQualityPredictor(settings.predictor_path)
     app.state.predictor = predictor
+    if predictor.is_trained:
+        log.info("predictor: %d model(s) with trained weights", len(predictor.weights))
+    app.state.feedback = FeedbackCollector(
+        telemetry, bandit, enabled=settings.enable_feedback
+    )
     app.state.latency = latency
     app.state.rate_governor = rate_governor
     app.state.inflight = inflight
@@ -251,6 +265,7 @@ async def lifespan(app: FastAPI):
         latency=latency,
         inflight=inflight,
         stochastic=settings.stochastic_routing,
+        neighbors=neighbors if settings.enable_neighbors else None,
     )
     app.state.executor = Executor(
         adapter,
@@ -417,6 +432,32 @@ async def lifespan(app: FastAPI):
             "local_backends": local_results,
         }
 
+    async def job_retrain():
+        """Retrain the per-model predictor on our own traffic.
+
+        Runs in a thread: it is numpy over a few thousand rows, short but
+        not instant, and the event loop is serving requests. Weights are
+        swapped in only after the script decides they beat the base rate
+        — a fit that does not is simply not written, and the router keeps
+        using the prior.
+        """
+        from scripts.train_predictor import train  # noqa: PLC0415
+
+        result = await asyncio.to_thread(
+            train, settings.db_path, settings.predictor_path, verbose=False
+        )
+        if predictor.reload():
+            log.info(
+                "predictor: reloaded, %d model(s) from %d rows",
+                len(result.get("models", {})),
+                result.get("rows", 0),
+            )
+        return {
+            "rows": result.get("rows", 0),
+            "models": list(result.get("models", {})),
+            "skipped": result.get("skipped", {}),
+        }
+
     async def job_purge():
         removed = app.state.idempotency.purge()
         return {"idempotency_removed": removed}
@@ -457,6 +498,13 @@ async def lifespan(app: FastAPI):
 
     control.add(
         "purge", job_purge, settings.purge_interval_h * 3600, initial_delay_s=300.0
+    )
+    control.add(
+        "retrain",
+        job_retrain,
+        settings.retrain_interval_h * 3600,
+        initial_delay_s=900.0,
+        enabled=settings.enable_retrain,
     )
     control.add(
         "cluster",
@@ -623,7 +671,20 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
     the batch worker — the same code, a different latency_class."""
     t0 = time.perf_counter()
     meta = meta or RouterMeta()
+    # One id per request, minted here so cache hits, attempts and later
+    # feedback all speak about the same thing.
+    if not meta.request_id:
+        meta.request_id = f"req_{uuid.uuid4().hex[:12]}"
     metrics: Metrics = app.state.metrics
+
+    # This request is also a verdict on the previous one. A regeneration,
+    # a "no, not like that", or simply carrying on — the only quality
+    # signal that exists for free-form text, where the verifier has
+    # nothing it can check.
+    collector: FeedbackCollector = app.state.feedback
+    if (signal := collector.infer(req)) is not None:
+        collector.record(signal)
+        metrics.inc("waypost_feedback_total", kind=signal.kind)
 
     profile = classify(
         req, enable_l1=settings.enable_l1_classifier, head_path=str(settings.head_path)
@@ -673,7 +734,7 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
             profile.tier.value,
         )
         lat_ms = int((time.perf_counter() - t0) * 1000)
-        req_id = req.session_id or f"req_{uuid.uuid4().hex[:8]}"
+        req_id = meta.request_id
         hit["router"] = {
             **hit.get("router", {}),
             "cache": "exact",
@@ -749,7 +810,7 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
                     profile.tier.value,
                 )
                 lat_ms = int((time.perf_counter() - t0) * 1000)
-                req_id = req.session_id or f"req_{uuid.uuid4().hex[:8]}"
+                req_id = meta.request_id
                 hit["router"] = {
                     **hit.get("router", {}),
                     "cache": "semantic",
@@ -950,7 +1011,25 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
                     log.debug("fanout escalation failed: %s", exc)
 
     meta.registry_version = app.state.registry.version
+    # Feed the neighbourhood from live traffic, so "who handled requests
+    # like this one" includes what just happened.
+    if profile.embedding is not None and meta.provider:
+        app.state.neighbors.add(
+            profile.embedding,
+            f"{meta.provider}/{meta.model}",
+            0.0 if meta.escalated else 1.0,
+            time.time(),
+        )
     app.state.router.remember(req.session_id, f"{meta.provider}/{meta.model}", prefix)
+    # Remember what we answered, so the next request in this session can
+    # be read as a judgement on it.
+    collector.remember(
+        req.session_id,
+        meta.request_id or "",
+        f"{meta.provider}/{meta.model}",
+        profile.task_class,
+        req.messages,
+    )
 
     elapsed = (time.perf_counter() - t0) * 1000
     log.info(
@@ -2476,6 +2555,40 @@ async def run_job(name: str):
     return {"job": name, "result": result}
 
 
+@app.post("/v1/feedback")
+async def feedback_endpoint(payload: dict = Body(...)):
+    """Explicit rating of an answer.
+
+    Recorded at full weight and overriding whatever was inferred for that
+    request: a thumbs-down is evidence, "the user sent another message"
+    is a guess.
+    """
+    request_id = payload.get("request_id") or payload.get("id")
+    rating = str(payload.get("rating") or payload.get("signal") or "").lower()
+    if not request_id or rating not in (
+        "good", "bad", "up", "down", "positive", "negative", "1", "0",
+    ):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "request_id and rating (good|bad) are required"},
+        )
+    matched = app.state.feedback.rate(
+        request_id, rating, session_id=payload.get("session_id")
+    )
+    app.state.metrics.inc("waypost_feedback_total", kind=f"rated_{rating}")
+    return {"ok": True, "applied_to_offering": matched}
+
+
+@app.get("/v1/feedback")
+async def feedback_stats():
+    return {
+        **app.state.feedback.snapshot(),
+        "history": app.state.telemetry.feedback_stats(),
+        "predictor": app.state.predictor.snapshot(),
+        "neighbors": app.state.neighbors.snapshot(),
+    }
+
+
 @app.post("/v1/registry/reload")
 async def reload_registry(payload: dict = Body(default_factory=dict)):
     """Rebuild the pool from the manifest plus discovery, validate it, and
@@ -2529,6 +2642,9 @@ def _build_stats_payload() -> dict:
         "inflight": dict(app.state.inflight),
         "pool": pool,
         "registry_version": registry.version,
+        "feedback": app.state.feedback.snapshot(),
+        "predictor": app.state.predictor.snapshot(),
+        "neighbors": app.state.neighbors.snapshot(),
         "cluster": app.state.shared.snapshot()
         if app.state.shared is not None
         else {"backend": "in-process"},
@@ -3670,6 +3786,7 @@ async def chat_completions(req: ChatRequest, request: Request):
 
     if req.stream:
         meta = RouterMeta()
+        meta.request_id = f"req_{uuid.uuid4().hex[:12]}"
         profile = classify(
             req,
             enable_l1=settings.enable_l1_classifier,

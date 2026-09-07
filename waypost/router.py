@@ -15,6 +15,7 @@ from .bandit import Bandit
 from .breaker import CircuitBreaker
 from .latency import LatencyTracker
 from .ledger import Ledger
+from .neighbors import NeighborIndex
 from .registry import Offering, Registry
 from .schemas import Capability, ChatRequest, RequestProfile, Tier
 
@@ -121,6 +122,7 @@ class Router:
         latency: LatencyTracker | None = None,
         inflight: dict[str, int] | None = None,
         stochastic: bool = True,
+        neighbors: NeighborIndex | None = None,
     ):
         self.registry = registry
         self.ledger = ledger
@@ -139,6 +141,10 @@ class Router:
         # Thompson draw instead of the posterior mean. Deterministic
         # scoring is what makes a burst stampede onto one provider.
         self.stochastic = stochastic
+        # kNN over past attempts: "who handled requests like this one".
+        # Sharper than the bandit's five task buckets, and unlike the
+        # predictor it needs no training step.
+        self.neighbors = neighbors
         # Sticky routing: switching providers zeroes a warmed-up prefix,
         # and that is more expensive than a small scoring loss. Two
         # binding keys: the session (a dialogue) and the hash of the
@@ -146,6 +152,7 @@ class Router:
         # sessions).
         self._sticky: dict[str, str] = {}
         self._sticky_prefix: dict[str, str] = {}
+        self._neighbor_cache: dict[str, tuple[float, float]] = {}
 
     def local_vs_cloud_threshold(self) -> float:
         """Calculates adaptive quota threshold (Spec K.2).
@@ -297,13 +304,27 @@ class Router:
         if affinity and self.latency.drifted(o.key):
             affinity = 0.0
 
-        # Quality: predicted P(pass) or bandit / task-specific quality
+        # Quality, in three layers of decreasing generality and
+        # increasing specificity to THIS query. Each one only displaces
+        # the layer under it in proportion to the evidence behind it —
+        # a sharper estimate that is mostly noise is worse than a blunt
+        # one that is true.
+        #
+        #   manifest prior  → what someone wrote down
+        #   predictor       → regression over the embedding, per model
+        #   neighbourhood   → how this model did on similar queries
+        #   bandit          → the running record for this task class
+        embedding = getattr(p, "embedding", None)
         if self.predictor:
-            base_quality = self.predictor.predict_p_pass(
-                o, p, embedding=getattr(p, "embedding", None)
-            )
+            base_quality = self.predictor.predict_p_pass(o, p, embedding=embedding)
         else:
             base_quality = o.quality_for(p.task_class)
+
+        if self.neighbors is not None and embedding is not None:
+            est = self._neighbor_cache.get(o.key)
+            if est is not None:
+                mean, trust = est
+                base_quality = trust * mean + (1.0 - trust) * base_quality
         if self.bandit is None:
             quality = base_quality
         elif self.stochastic:
@@ -343,6 +364,7 @@ class Router:
     ) -> list[Candidate]:
         """Returns an ordered list of attempts, not a single model. The
         executor descends it on failures."""
+        self._refresh_neighbors(p)
         if req.model != "auto":
             low_model = req.model.lower()
             # Support targeting a tier directly (e.g. 'Tier S', 'Tier M', 'Tier L', 'tier:s')
@@ -419,6 +441,22 @@ class Router:
         return self._auto_plan(
             req, p, limit, quality_floor=quality_floor, prefix=prefix
         )
+
+    def _refresh_neighbors(self, p: RequestProfile) -> None:
+        """One neighbourhood lookup per request, shared by every candidate.
+
+        Finding the nearest past queries is the expensive half; splitting
+        them by who answered is free. Doing it per candidate would repeat
+        the same scan a dozen times for one plan.
+        """
+        self._neighbor_cache = {}
+        embedding = getattr(p, "embedding", None)
+        if self.neighbors is None or embedding is None:
+            return
+        try:
+            self._neighbor_cache = self.neighbors.estimate(embedding)
+        except Exception:  # noqa: BLE001 — scoring must not fail on this
+            self._neighbor_cache = {}
 
     def _auto_plan(
         self,

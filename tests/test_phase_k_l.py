@@ -54,6 +54,9 @@ def test_phase_k_predictor_fallback_and_prediction():
             offering.key: {
                 "bias": 0.5,
                 "coefs": [0.2, -0.1, 0.4],
+                # How many observations stand behind the fit. A prediction
+                # is blended into the prior in proportion to this.
+                "n": 10_000,
             }
         }
         pred.is_trained = True
@@ -67,6 +70,16 @@ def test_phase_k_predictor_fallback_and_prediction():
         # sigmoid(0.7) ≈ 0.668
         p_calc = pred_loaded.predict_p_pass(offering, profile, embedding=emb)
         assert 0.65 < p_calc < 0.70
+
+        # The same fit with almost no data behind it must barely move the
+        # prior instead of replacing it: routing confidently on a
+        # regression over forty rows is worse than routing on the manifest.
+        thin = ModelQualityPredictor()
+        thin.weights = {
+            offering.key: {"bias": 0.5, "coefs": [0.2, -0.1, 0.4], "n": 5}
+        }
+        thin.is_trained = True
+        assert thin.predict_p_pass(offering, profile, embedding=emb) > 0.85
 
 
 def test_phase_k_adaptive_quota_threshold():

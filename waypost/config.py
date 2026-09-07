@@ -55,8 +55,30 @@ class Settings(BaseSettings):
 
     # L1 classifier: requires `pip install model2vec` and a trained head.
     # Off by default — heuristics cover most cases.
-    enable_l1_classifier: bool = False
+    # The head trains in seconds and weighs kilobytes; when it is absent
+    # the classifier falls back to rules on its own, so leaving this off
+    # only meant a trained head sat on disk unused.
+    enable_l1_classifier: bool = True
     head_path: Path = Path("var/head.json")
+
+    # Per-model quality predictor: P(pass | query, model) over the query
+    # embedding. Trained offline by scripts/train_predictor.py from the
+    # attempt log. Absent weights mean the manifest prior, which is the
+    # right answer until there is enough traffic to beat it.
+    predictor_path: Path = Path("var/predictor.json")
+    retrain_interval_h: float = 12.0
+    enable_retrain: bool = True
+
+    # kNN over past attempts: sharper than the bandit's five task
+    # buckets, and needs no training step — useful from a few hundred
+    # rows, where the regression is still noise.
+    enable_neighbors: bool = True
+    neighbor_capacity: int = 5000
+
+    # Implicit feedback: read the user's next action as a verdict on the
+    # last answer. The only quality signal that exists for free-form
+    # text, where the verifier has nothing to check.
+    enable_feedback: bool = True
 
     # Semantic cache (L2): requires embeddings (model2vec). The threshold
     # is tuned on your own logs, not borrowed from a paper.

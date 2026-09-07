@@ -145,6 +145,46 @@ Two failure contours, deliberately separate:
 Neither of them touches the bandit. Its reward is the **verifier's
 verdict** — a 200 carrying malformed JSON is not a success.
 
+## It learns from its own traffic
+
+The verifier can only judge what is mechanically checkable — valid JSON,
+parseable code, a truncated answer, the wrong language. That is a
+minority of the traffic. For chat, summarization and explanation there
+was no quality signal at all, so the bandit learned nothing about the
+classes where most requests live.
+
+The signal exists; it was never collected. The user's next action is a
+verdict on the last answer: the same request again (a regeneration), a
+message opening with "no, not like that" (a rejection), or simply
+carrying on (weak, but real). Those become bandit rewards, deliberately
+weak ones — "no, in Python" after a correct answer is a change of mind,
+not a defect, and nothing outside the user can tell the two apart. An
+explicit rating through `POST /v1/feedback` is recorded at full weight
+and overrides whatever was inferred.
+
+Quality is then estimated in four layers, each displacing the one under
+it only in proportion to the evidence behind it:
+
+```
+manifest prior     what someone wrote down
+  ↓ bandit         the running record for this task class  (5 buckets)
+  ↓ neighbourhood  how this model did on similar queries   (kNN, no training)
+  ↓ predictor      logistic regression over the embedding  (per model)
+```
+
+The last two use the query embedding, which was computed for every
+request, logged with every attempt, and read by nobody. The
+neighbourhood is useful from a few hundred rows; the regression is
+trained offline and only kept when it beats the base rate on held-out
+data:
+
+```bash
+python -m scripts.train_predictor --db var/router.db --out var/predictor.json
+```
+
+On too little data it trains nothing and says so, and the router falls
+back to the prior — which is the correct answer, not a failure.
+
 ## The pool updates itself
 
 Discovery finds new free models, probing measures them, providers retire
@@ -479,7 +519,7 @@ per provider), `waypost_quota_remaining`, `waypost_breaker_state`,
 `waypost_latency_ema_ms` and `waypost_latency_drift_ratio` (a ratio above
 ~2.5 is a provider degrading while still answering 200),
 `waypost_learned_rpm`, `waypost_inflight`, `waypost_pool_size` by
-lifecycle state. `/v1/stats` also carries `registry_version` and whether
+lifecycle state, `waypost_feedback_total` by signal kind. `/v1/stats` also carries `registry_version` and whether
 state is shared or in-process.
 
 The terminal logs say what happened:

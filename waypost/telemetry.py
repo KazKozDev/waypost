@@ -110,6 +110,21 @@ class Telemetry:
             )
             c.execute("CREATE INDEX IF NOT EXISTS idx_prompts_ts ON prompts(ts)")
 
+            # Implicit and explicit quality feedback. The verifier can only
+            # judge what is mechanically checkable; for the rest, the
+            # user's next action is the only signal there is. Kept in its
+            # own table because it arrives AFTER the attempt row is
+            # written, and often long after.
+            c.execute(
+                """
+                CREATE TABLE IF NOT EXISTS feedback (
+                    ts REAL, request_id TEXT, offering TEXT, task_class TEXT,
+                    kind TEXT, reward REAL, source TEXT)
+            """
+            )
+            c.execute("CREATE INDEX IF NOT EXISTS idx_fb_req ON feedback(request_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_fb_ts ON feedback(ts)")
+
             # Waypost v5: attempt_log table for attempt-level outcomes
             c.execute(
                 """
@@ -320,6 +335,92 @@ class Telemetry:
                 (since,),
             ).fetchall()
         return {r[0]: r[1] for r in rows if r[2] >= 5}
+
+    def log_feedback(
+        self,
+        *,
+        request_id: str,
+        offering: str,
+        task_class: str,
+        kind: str,
+        reward: float,
+        source: str,
+    ) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO feedback VALUES (?,?,?,?,?,?,?)",
+                (time.time(), request_id, offering, task_class, kind, reward, source),
+            )
+
+    def feedback_stats(self, window_s: float = 7 * 86_400) -> dict[str, Any]:
+        """What the users are actually telling us, per offering.
+
+        This is the number to watch: an offering that passes every
+        mechanical check and still collects regenerations is exactly the
+        failure the verifier cannot see.
+        """
+        since = time.time() - window_s
+        with self._conn() as c:
+            by_kind = c.execute(
+                "SELECT kind, COUNT(*) FROM feedback WHERE ts > ? GROUP BY kind",
+                (since,),
+            ).fetchall()
+            by_offering = c.execute(
+                "SELECT offering, COUNT(*), AVG(reward) FROM feedback "
+                "WHERE ts > ? AND offering != '' GROUP BY offering",
+                (since,),
+            ).fetchall()
+        return {
+            "by_kind": {r[0]: r[1] for r in by_kind},
+            "by_offering": {
+                r[0]: {"n": int(r[1]), "avg_reward": round(float(r[2] or 0), 3)}
+                for r in by_offering
+            },
+        }
+
+    def training_rows(
+        self, limit: int = 20_000, min_ts: float = 0.0
+    ) -> list[dict[str, Any]]:
+        """(embedding, model, reward) triples — the training set.
+
+        Joined with feedback so a row carries what the user thought, not
+        only what the verifier could prove. Rows without an embedding are
+        useless here and are dropped.
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                """
+                SELECT a.request_id, a.embedding, a.model, a.provider,
+                       a.tier, a.outcome, a.status, a.ts,
+                       (SELECT AVG(f.reward) FROM feedback f
+                         WHERE f.request_id = a.request_id) AS fb
+                  FROM attempt_log a
+                 WHERE a.embedding IS NOT NULL AND a.is_final = 1 AND a.ts > ?
+                 ORDER BY a.ts DESC LIMIT ?
+                """,
+                (min_ts, limit),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for req_id, blob, model, provider, tier, outcome, status, ts, fb in rows:
+            emb = _deserialize_embedding(blob)
+            if not emb:
+                continue
+            # The verifier's verdict is the base; explicit and implicit
+            # feedback moves it. Where both exist the average is taken —
+            # they are measuring the same thing from different angles.
+            base = 1.0 if outcome == "pass" and status == "ok" else 0.0
+            reward = base if fb is None else (base + float(fb)) / 2.0
+            out.append(
+                {
+                    "request_id": req_id,
+                    "embedding": emb,
+                    "offering": f"{provider}/{model}",
+                    "tier": tier,
+                    "reward": reward,
+                    "ts": ts,
+                }
+            )
+        return out
 
     def attempt_counts(self, window_s: float = 86_400) -> dict[str, tuple[int, float]]:
         """(attempts, success rate) per offering.
