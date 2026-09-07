@@ -35,7 +35,10 @@ def test_config_defaults():
     cfg = Settings()
     assert cfg.enable_semantic_cache is True
     assert cfg.semantic_threshold == 0.95
-    assert cfg.enable_exploration is True
+    # Exploration by duplicate call is off: the router samples the bandit
+    # posterior when it selects, so exploring no longer costs a second
+    # request against a free-tier quota.
+    assert cfg.enable_exploration is False
     assert cfg.explore_rate == 0.10
     assert cfg.explore_floor == 0.02
 

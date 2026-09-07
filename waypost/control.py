@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
@@ -96,12 +97,19 @@ class ControlPlane:
         finally:
             job.last_run = started
 
+    def _next_delay(self, job: Job) -> float:
+        """+/-20% jitter. Without it every instance (and every job that
+        shares an interval) wakes at the same instant and probes the same
+        providers together — a self-inflicted burst on exactly the free
+        tiers the router is trying to conserve."""
+        return job.interval_s * (0.8 + 0.4 * random.random())
+
     async def _loop(self, job: Job) -> None:
         if job.initial_delay_s:
-            await asyncio.sleep(job.initial_delay_s)
+            await asyncio.sleep(job.initial_delay_s * (0.8 + 0.4 * random.random()))
         while True:
             await self._run(job)
-            await asyncio.sleep(job.interval_s)
+            await asyncio.sleep(self._next_delay(job))
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         return {

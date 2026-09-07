@@ -11,6 +11,8 @@ classification, fallback turns into guesswork.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, AsyncIterator
@@ -40,15 +42,37 @@ class ProviderError(Exception):
         return f"[{self.verdict}] {self.status}: {self.message}"
 
 
+def parse_retry_after(value: str | None, default: float = 60.0) -> float:
+    """Retry-After is either delta-seconds or an HTTP-date (RFC 9110).
+
+    Only the first form was handled; a date fell through to the default,
+    so the router waited a flat minute where the provider had said five
+    seconds — or five minutes.
+    """
+    if not value:
+        return default
+    raw = value.strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return default
+    if when is None:
+        return default
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    delta = (when - datetime.now(timezone.utc)).total_seconds()
+    # A date in the past means "retry now", not "wait a minute".
+    return max(0.0, min(delta, 86_400.0))
+
+
 def classify_error(
     status: int, body: str, headers: httpx.Headers | None = None
 ) -> ProviderError:
-    retry_after = 60.0
-    if headers and (ra := headers.get("retry-after")):
-        try:
-            retry_after = float(ra)
-        except ValueError:
-            pass
+    retry_after = parse_retry_after(headers.get("retry-after") if headers else None)
 
     low = body.lower()
     if status == 429 or "rate limit" in low or "quota" in low:
@@ -161,18 +185,30 @@ class OpenAICompatAdapter:
         payload = build_payload(req, o, stream=True)
         stream_timeout = httpx.Timeout(connect=30.0, read=300.0, write=60.0, pool=30.0)
         try:
-            async with self.client.stream(
-                "POST",
-                self._url(o),
-                json=payload,
-                headers=self._headers(o, api_key, idempotency_key),
-                timeout=stream_timeout,
-            ) as r:
-                if r.status_code >= 400:
-                    body = (await r.aread()).decode("utf-8", "replace")
-                    raise classify_error(r.status_code, body, r.headers)
-                async for chunk in r.aiter_bytes():
-                    yield chunk
+            payloads = [payload]
+            if "stream_options" in payload:
+                fallback = dict(payload)
+                fallback.pop("stream_options", None)
+                payloads.append(fallback)
+            for index, candidate_payload in enumerate(payloads):
+                async with self.client.stream(
+                    "POST",
+                    self._url(o),
+                    json=candidate_payload,
+                    headers=self._headers(o, api_key, idempotency_key),
+                    timeout=stream_timeout,
+                ) as r:
+                    if r.status_code >= 400:
+                        body = (await r.aread()).decode("utf-8", "replace")
+                        # Some compatible APIs reject the optional OpenAI
+                        # stream_options field. Retry once without it before
+                        # exposing the provider error to the routing ladder.
+                        if index == 0 and len(payloads) > 1 and r.status_code == 400:
+                            continue
+                        raise classify_error(r.status_code, body, r.headers)
+                    async for chunk in r.aiter_bytes():
+                        yield chunk
+                    return
         except (httpx.TimeoutException, httpx.ConnectError) as exc:
             raise ProviderError(Verdict.RETRY, 408, str(exc), 1.0) from exc
 

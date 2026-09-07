@@ -675,6 +675,7 @@ def render_setup_html(data: dict[str, Any]) -> str:
     data_health = data.get("data_health", {})
     beta_metric = data.get("beta_metric", {})
     pricing = data.get("pricing", {})
+    pricing_coverage = float(pricing.get("usage_coverage_pct", 0.0) or 0.0)
 
     # Subsystems table
     sub_rows = []
@@ -806,6 +807,11 @@ def render_setup_html(data: dict[str, Any]) -> str:
         <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase">Total Routed Tokens</div>
         <div style="font-size:24px;font-weight:800">{pricing.get('total_tokens', 0):,}</div>
       </div>
+    </div>
+    <div style="text-align:center;font-size:12px;color:var(--text-secondary);border-top:1px solid var(--border-light);padding-top:10px;">
+      Exact token usage coverage: <b>{pricing_coverage:.1f}%</b>
+      ({pricing.get('measured_requests', 0):,}/{pricing.get('total_requests', 0):,} requests)
+      · baseline: <b>{html.escape(str(pricing.get('baseline', 'Waypost commercial baseline v1')))}</b>
     </div>
   </div>
 

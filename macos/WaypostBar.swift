@@ -196,8 +196,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         let modeDesc = server.lastMode == "cloud" ? "Cloud" : server.lastMode == "auto" ? "Auto" : "Local"
-        let modelDesc = server.lastModel.isEmpty ? "" : " · \(server.lastModel)"
-        let statusText = st == .running ? "Server: Running (\(modeDesc)\(modelDesc))"
+        // NSMenu grows to fit its longest item. Full provider/model IDs made
+        // this small status menu span a large part of the screen, while the
+        // routing details are already available in Waypost itself.
+        let statusText = st == .running ? "Server: Running · \(modeDesc)"
                        : st == .starting ? "Server: Starting…"
                        : st == .stopped ? "Server: Stopped"
                        : "Server: Failed"

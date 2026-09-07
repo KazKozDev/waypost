@@ -138,6 +138,81 @@ def test_chat_completion_is_openai_shaped(client):
     assert body["router"]["cache"] == "miss"
 
 
+def test_responses_endpoint_is_openai_shaped(client):
+    r = client.post(
+        "/v1/responses",
+        json={
+            "model": "auto",
+            "instructions": "Answer briefly.",
+            "input": "сколько будет 6*7",
+            "max_output_tokens": 32,
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["object"] == "response"
+    assert body["status"] == "completed"
+    assert body["output_text"] == "42"
+    assert body["output"][0]["type"] == "message"
+    assert body["output"][0]["content"][0]["type"] == "output_text"
+    assert body["usage"] == {
+        "input_tokens": 10,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens": 2,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": 12,
+    }
+    assert body["router"]["provider"] == "cloud"
+
+
+def test_responses_path_normalization_and_validation(client):
+    ok = client.post("/responses", json={"model": "auto", "input": "hello"})
+    assert ok.status_code == 200
+
+    bad = client.post(
+        "/v1/responses",
+        json={"input": "hello", "tools": [{"type": "web_search"}]},
+    )
+    assert bad.status_code == 400
+    assert bad.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_responses_function_items_translate_to_chat():
+    from waypost.responses import responses_to_chat
+
+    req = responses_to_chat(
+        {
+            "model": "auto",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "weather?"}]},
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "weather",
+                    "arguments": '{"city":"Paris"}',
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "20C"},
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "weather",
+                    "description": "Get weather",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+            "tool_choice": {"type": "function", "name": "weather"},
+        }
+    )
+
+    assert req.messages[0].content == [{"type": "text", "text": "weather?"}]
+    assert req.messages[1].tool_calls[0]["id"] == "call_1"
+    assert req.messages[2].role == "tool"
+    assert req.messages[2].tool_call_id == "call_1"
+    assert req.tools[0]["function"]["name"] == "weather"
+    assert req.tool_choice == {"type": "function", "function": {"name": "weather"}}
+
+
 def test_exact_cache_serves_second_identical_request(client):
     payload = {
         "model": "auto",
@@ -282,6 +357,61 @@ def test_stream_preflight_preserves_chunks_and_adds_done(client, monkeypatch):
     assert r.status_code == 200
     assert r.text.count('"content":"hi"') == 1
     assert r.text.count("data: [DONE]") == 1
+
+
+def test_responses_stream_translates_text_events(client, monkeypatch):
+    import waypost.server as srv
+
+    async def successful_stream(req, profile, plan, meta):
+        yield b'data: {"id":"chatcmpl-x","model":"big","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n'
+        yield b'data: {"id":"chatcmpl-x","model":"big","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n'
+        yield b"data: [DONE]\n\n"
+
+    monkeypatch.setattr(srv.app.state.executor, "stream", successful_stream)
+    r = client.post(
+        "/v1/responses",
+        json={"model": "auto", "input": "hello", "stream": True},
+    )
+
+    assert r.status_code == 200
+    assert "event: response.created" in r.text
+    assert "event: response.output_text.delta" in r.text
+    assert '"delta":"hi"' in r.text
+    assert "event: response.completed" in r.text
+    assert '"output_text":"hi"' in r.text
+    assert '"total_tokens":4' in r.text
+
+
+def test_responses_stream_translates_function_calls(client, monkeypatch):
+    import waypost.server as srv
+
+    async def tool_stream(req, profile, plan, meta):
+        yield b'data: {"model":"big","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"weather","arguments":"{\\\"city\\\":"}}]}}]}\n\n'
+        yield b'data: {"model":"big","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\\"Paris\\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n'
+        yield b"data: [DONE]\n\n"
+
+    monkeypatch.setattr(srv.app.state.executor, "stream", tool_stream)
+    r = client.post(
+        "/v1/responses",
+        json={
+            "model": "auto",
+            "input": "weather?",
+            "stream": True,
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "weather",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        },
+    )
+
+    assert r.status_code == 200
+    assert "event: response.function_call_arguments.delta" in r.text
+    assert "event: response.function_call_arguments.done" in r.text
+    assert '"call_id":"call_1"' in r.text
+    assert '"arguments":"{\\\"city\\\":\\\"Paris\\\"}"' in r.text
 
 
 def test_chat_html_endpoints(client):

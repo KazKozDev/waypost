@@ -218,10 +218,58 @@ class Ledger:
                 b.blocked_until = max(b.blocked_until, until)
             self._persist(bk)
 
+    def set_limit(self, o: Offering, key_index: int, name: str, limit: int) -> None:
+        """Override a bucket's limit at runtime (RateGovernor learning the
+        real rate limit). Shrinking below what is already used is
+        intentional: the bucket then refuses until the window rolls."""
+        if o.is_local:
+            return
+        with self._lock:
+            b = self._buckets.get(self.bucket_key(o, key_index), {}).get(name)
+            if b is not None:
+                b.limit = max(1, int(limit))
+
+    def pressure(self, o: Offering, key_index: int | None = None) -> float:
+        """How close to exhaustion this offering is: 0.0 = untouched,
+        1.0 = nothing left. The binding bucket decides — a provider with
+        rpm to spare and no rpd left is exhausted.
+
+        Replaces the old burn_ratio, which returned 1/rpd_limit: a
+        constant that did not depend on the remainder at all, so a
+        provider with one request left out of 250 scored exactly like a
+        full one and the pool cascaded into 429s under load.
+        """
+        if o.is_local:
+            return 0.0
+        with self._lock:
+            now = time.time()
+            if key_index is not None:
+                indices = [key_index]
+            else:
+                indices = list(range(self._key_counts.get(o.key, 1)))
+            # Several keys are several independent quotas: the offering is
+            # only under pressure when its *best* key is.
+            best = 1.0
+            for idx in indices:
+                buckets = self._buckets.get(self.bucket_key(o, idx), {})
+                if not buckets:
+                    return 0.0
+                worst = 0.0
+                for b in buckets.values():
+                    if b.limit <= 0:
+                        continue
+                    if now < b.blocked_until:
+                        worst = 1.0
+                        break
+                    b._roll(now)
+                    worst = max(worst, min(1.0, b.used / b.limit))
+                best = min(best, worst)
+            return best
+
     def burn_ratio(self, o: Offering, est_tokens: int) -> float:
-        """The share of the daily quota the request will eat. Used in
-        scoring: a background task must not burn the quota needed by
-        interactive traffic."""
+        """The share of the daily quota the request will eat. Kept as the
+        marginal cost of one call; the *remaining* quota is scored
+        separately by pressure()."""
         if o.is_local:
             return 0.0
         b = self._buckets.get(self.bucket_key(o, 0), {}).get("rpd")

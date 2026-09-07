@@ -31,13 +31,14 @@ from typing import Any, AsyncIterator
 
 from . import pricing
 from .bandit import Bandit
-from .breaker import CircuitBreaker
+from .breaker import CircuitBreaker, ProbeToken
+from .latency import LatencyTracker
 from .ledger import Ledger
+from .ratelimit import RateGovernor
 from .providers.openai_compat import (
     OpenAICompatAdapter,
     ProviderError,
     Verdict,
-    parse_usage,
 )
 from .registry import Offering
 from .router import Candidate
@@ -57,6 +58,59 @@ log = logging.getLogger("waypost.executor")
 # How many times the typical TTFT we wait before hedging.
 HEDGE_TTFT_FACTOR = 3.0
 HEDGE_MIN_DELAY_S = 0.5
+
+# Total wall-clock budget for one request, by latency class. Without it the
+# ladder is unbounded: max_attempts candidates x retries_per_provider x
+# timeout_s is ~16 minutes of a client holding a socket open, and every
+# rung of the ladder is spent on a request nobody is waiting for any more.
+DEADLINE_S = {
+    "interactive": 20.0,
+    "code_completion": 12.0,
+    "batch": 300.0,
+    "reasoning": 90.0,
+}
+DEFAULT_DEADLINE_S = 30.0
+# Below this there is no point starting another attempt.
+MIN_SLICE_S = 0.75
+# Share of the remaining budget a single attempt may spend while lower rungs
+# of the ladder are still ahead. Letting the first candidate use the whole
+# budget means the local fallback — the rung that always answers — never
+# gets its turn, and the client gets a 502 instead of a slightly worse
+# answer. The last candidate gets whatever is left.
+ATTEMPT_SHARE = 0.6
+
+
+class _StreamUsageTracker:
+    """Incrementally read usage from arbitrarily chunked SSE bytes."""
+
+    def __init__(self) -> None:
+        self._buffer = b""
+        self.body: dict[str, Any] | None = None
+
+    def feed(self, chunk: bytes) -> None:
+        self._buffer += chunk
+        lines = self._buffer.split(b"\n")
+        self._buffer = lines.pop()
+        for line in lines:
+            self._parse_line(line.rstrip(b"\r"))
+
+    def finish(self) -> None:
+        if self._buffer:
+            self._parse_line(self._buffer.rstrip(b"\r"))
+            self._buffer = b""
+
+    def _parse_line(self, line: bytes) -> None:
+        if not line.startswith(b"data:"):
+            return
+        raw = line[5:].strip()
+        if not raw or raw == b"[DONE]":
+            return
+        try:
+            body = json.loads(raw)
+        except (TypeError, ValueError):
+            return
+        if isinstance(body, dict) and isinstance(body.get("usage"), dict):
+            self.body = body
 
 
 def _detect_modality(req: ChatRequest) -> tuple[str, int, float, int | None]:
@@ -125,14 +179,22 @@ class Executor:
         bandit: Bandit | None = None,
         hedge_budget: float = 0.05,
         enable_hedging: bool = True,
-        enable_exploration: bool = True,
+        enable_exploration: bool = False,
         explore_rate: float = 0.10,
+        latency: LatencyTracker | None = None,
+        rate_governor: RateGovernor | None = None,
+        inflight: dict[str, int] | None = None,
+        deadlines: dict[str, float] | None = None,
     ):
         self.adapter = adapter
         self.ledger = ledger
         self.breaker = breaker
         self.telemetry = telemetry
         self.bandit = bandit
+        self.latency = latency or LatencyTracker()
+        self.rate_governor = rate_governor or RateGovernor(ledger)
+        self.inflight = inflight if inflight is not None else {}
+        self.deadlines = deadlines or dict(DEADLINE_S)
         self.verifier = verifier or Verifier()
         self.max_attempts = max_attempts
         self.timeout_s = timeout_s
@@ -142,20 +204,58 @@ class Executor:
         self.enable_exploration = enable_exploration
         self.explore_rate = explore_rate
         self._slots: dict[str, asyncio.Semaphore] = {}
-        self._counters = {"requests": 0, "hedges": 0, "billed": 0}
+        self._counters = {
+            "requests": 0,
+            "hedges": 0,
+            "billed": 0,
+            "deadline_exceeded": 0,
+            "explorations": 0,
+        }
+        # Fire-and-forget exploration tasks: asyncio only holds a weak
+        # reference, so without this set they can be collected mid-flight.
+        self._background: set[asyncio.Task] = set()
+
+    # ------------------------------------------------------------ deadline
+    def budget_for(self, req: ChatRequest) -> float:
+        return self.deadlines.get(
+            req.profile or "", self.deadlines.get(req.latency_class, DEFAULT_DEADLINE_S)
+        )
 
     # --------------------------------------------------------------- util
     def _bandit_update(self, o: Offering, profile: RequestProfile, ok: bool) -> None:
+        """Quality evidence only.
+
+        The bandit estimates how good this model is at this task class.
+        A 429, a connection reset or a 5xx says nothing about that — those
+        belong to the rate governor and the circuit breaker. Feeding them
+        here made the router avoid whichever provider was merely busy, and
+        rewarding every HTTP 200 (as this used to, before the verifier
+        ran) taught it that a syntactically broken answer was a success.
+        """
         if self.bandit is not None:
             self.bandit.update(profile.task_class, o.key, 1.0 if ok else 0.0)
+
+    def _enter(self, o: Offering) -> None:
+        self.inflight[o.key] = self.inflight.get(o.key, 0) + 1
+
+    def _leave(self, o: Offering) -> None:
+        n = self.inflight.get(o.key, 0) - 1
+        if n > 0:
+            self.inflight[o.key] = n
+        else:
+            self.inflight.pop(o.key, None)
 
     def _account(
         self, o: Offering, est: int, body: dict[str, Any], key_index: int
     ) -> Usage:
-        pt, ct = parse_usage(body)
-        self.ledger.commit(o, est, pt + ct or est, key_index)
+        pt, ct, total, _, measured = self._usage_details(o, body)
+        self.ledger.commit(o, est, total if measured else est, key_index)
         self._check_billed(o, body)
-        return Usage(prompt_tokens=pt, completion_tokens=ct, total_tokens=pt + ct)
+        return Usage(
+            prompt_tokens=pt or 0,
+            completion_tokens=ct or 0,
+            total_tokens=total,
+        )
 
     def _check_billed(self, o: Offering, body: dict[str, Any]) -> None:
         """The last line of wallet defense."""
@@ -173,26 +273,61 @@ class Executor:
                 cost,
             )
 
-    def _sniff_stream_cost(self, o: Offering, chunk: bytes) -> None:
-        """The same bill check, but for SSE."""
-        if b'"cost"' not in chunk and b'"total_cost"' not in chunk:
-            return
-        for line in chunk.split(b"\n"):
-            if not line.startswith(b"data: "):
-                continue
-            raw = line[6:].strip()
-            if not raw or raw == b"[DONE]":
-                continue
-            try:
-                body = json.loads(raw)
-            except ValueError:
-                continue
-            if isinstance(body, dict):
-                self._check_billed(o, body)
+    @staticmethod
+    def _usage_details(
+        o: Offering, body: dict[str, Any]
+    ) -> tuple[int | None, int | None, int, float | None, bool]:
+        usage = body.get("usage")
+        measured = isinstance(usage, dict) and any(
+            key in usage
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        )
+        prompt_tokens = (
+            int(usage["prompt_tokens"])
+            if measured and usage.get("prompt_tokens") is not None
+            else None
+        )
+        completion_tokens = (
+            int(usage["completion_tokens"])
+            if measured and usage.get("completion_tokens") is not None
+            else None
+        )
+        split_total = (prompt_tokens or 0) + (completion_tokens or 0)
+        total_tokens = (
+            int(usage["total_tokens"])
+            if measured and usage.get("total_tokens") is not None
+            else split_total
+        )
+        billed = pricing.billed_cost(body)
+        actual_cost = (
+            billed
+            if billed is not None
+            else (0.0 if o.free or o.is_local else None)
+        )
+        return prompt_tokens, completion_tokens, total_tokens, actual_cost, measured
 
-    async def _backoff(self, attempt: int) -> None:
+    def _slice(self, deadline: float | None, share: float) -> float:
+        """How long this attempt may run: a share of what is left, so the
+        rungs below it still have a budget to run in."""
+        left = self._left(deadline)
+        if left == float("inf"):
+            return self.timeout_s
+        return min(self.timeout_s, max(0.0, left * share))
+
+    @staticmethod
+    def _left(deadline: float | None) -> float:
+        """Seconds of budget left. No deadline means the old unbounded
+        behaviour, kept for embedded callers and the batch worker."""
+        if deadline is None:
+            return float("inf")
+        return deadline - time.monotonic()
+
+    async def _backoff(self, attempt: int, deadline: float | None = None) -> None:
         delay = min(8.0, 0.4 * (2**attempt)) * (0.5 + random.random())
-        await asyncio.sleep(delay)
+        # Sleeping past the deadline burns the budget the retry needs.
+        delay = min(delay, max(0.0, self._left(deadline) - MIN_SLICE_S))
+        if delay > 0:
+            await asyncio.sleep(delay)
 
     def _slot(self, o: Offering) -> asyncio.Semaphore | None:
         """A parallelism limiter. For mlx-lm this is not tuning: two
@@ -217,9 +352,22 @@ class Executor:
         routing_source: str | None = None,
         is_exploration: bool = False,
         attempt_no: int = 1,
+        timeout: float | None = None,
     ) -> Attempt:
         """One provider call with reservation, accounting and attempt logging."""
         est = profile.est_total_tokens
+        call_timeout = self.timeout_s if timeout is None else max(0.1, timeout)
+        # The half-open probe token is taken HERE, at the real call — not
+        # while planning. It is released on every path below.
+        probe = self.breaker.acquire_probe(o.provider)
+        if CircuitBreaker.probe_lost_race(probe):
+            return Attempt(
+                error=ProviderError(
+                    Verdict.SWITCH, 503, "circuit open (probe in flight)", 5.0
+                ),
+                offering=o,
+                key_index=key_index,
+            )
         self.ledger.reserve(o, est, key_index)
         t0 = time.perf_counter()
         sem = self._slot(o)
@@ -246,33 +394,75 @@ class Executor:
             )
         )
 
-        try:
+        async def _do() -> dict[str, Any]:
             if sem is not None:
                 async with sem:
-                    body = await self.adapter.complete(
+                    return await self.adapter.complete(
                         o,
                         req,
-                        self.timeout_s,
+                        call_timeout,
                         api_key=o.api_key_at(key_index),
                         idempotency_key=req.idempotency_key,
                     )
-            else:
-                body = await self.adapter.complete(
-                    o,
-                    req,
-                    self.timeout_s,
-                    api_key=o.api_key_at(key_index),
-                    idempotency_key=req.idempotency_key,
-                )
+            return await self.adapter.complete(
+                o,
+                req,
+                call_timeout,
+                api_key=o.api_key_at(key_index),
+                idempotency_key=req.idempotency_key,
+            )
+
+        self._enter(o)
+        try:
+            # The transport timeout is not enough to bound an attempt: it
+            # applies per socket operation, so a provider dripping bytes
+            # slowly can outlive any read timeout. The budget is enforced
+            # here, where it is actually a deadline.
+            body = await asyncio.wait_for(_do(), call_timeout)
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            self.ledger.commit(o, est, 0, key_index)
+            self._leave(o)
+            self.breaker.release_probe(probe)
+            latency = (time.perf_counter() - t0) * 1000
+            self.latency.observe(o.key, latency)
+            self.telemetry.log_attempt(
+                o.key,
+                profile,
+                ok=False,
+                verdict=Verdict.RETRY.value,
+                latency_ms=latency,
+                key_index=key_index,
+            )
+            log.warning(
+                "attempt %s[key%d] exceeded its %.1fs slice", o.key, key_index,
+                call_timeout,
+            )
+            return Attempt(
+                error=ProviderError(
+                    Verdict.RETRY, 408, f"attempt exceeded {call_timeout:.1f}s", 1.0
+                ),
+                offering=o,
+                key_index=key_index,
+            )
         except asyncio.CancelledError:
             # A canceled hedge: return the quota, otherwise the losing
             # branch eats the limit while spending nothing.
             self.ledger.commit(o, est, 0, key_index)
+            self.breaker.release_probe(probe)
+            self._leave(o)
             raise
         except ProviderError as exc:
             self.ledger.commit(o, est, 0, key_index)
-            self._bandit_update(o, profile, ok=False)
+            self._leave(o)
             latency = (time.perf_counter() - t0) * 1000
+            # A refusal is not a quality signal, so the bandit is not
+            # touched here. A timeout IS a latency signal: the budget it
+            # burned is exactly what the router needs to see.
+            if exc.status in (408, 504):
+                self.latency.observe(o.key, latency)
+            if exc.status == 429:
+                self.rate_governor.on_rate_limit(o, key_index)
+            self.breaker.release_probe(probe)
             self.telemetry.log_attempt(
                 o.key,
                 profile,
@@ -339,10 +529,15 @@ class Executor:
             log.warning("attempt %s[key%d] failed: %s", o.key, key_index, exc)
             return Attempt(error=exc, offering=o, key_index=key_index)
 
+        self._leave(o)
         usage = self._account(o, est, body, key_index)
-        self.breaker.on_success(o.provider)
-        self._bandit_update(o, profile, ok=True)
+        prompt_tokens, completion_tokens, _, actual_cost, usage_measured = (
+            self._usage_details(o, body)
+        )
+        self.breaker.on_success(o.provider)  # also clears the probe token
+        self.rate_governor.on_success(o, key_index)
         latency = (time.perf_counter() - t0) * 1000
+        self.latency.observe(o.key, latency)
         self.telemetry.log_attempt(
             o.key,
             profile,
@@ -351,20 +546,26 @@ class Executor:
             latency_ms=latency,
             tokens=usage.total_tokens,
             key_index=key_index,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            actual_cost_usd=actual_cost,
+            usage_measured=usage_measured,
         )
 
         v_ok, v_reason = (
             self.verifier.verify(req, profile, body) if self.verifier else (True, "")
         )
+        # The reward is the verifier's verdict, not the HTTP status. A 200
+        # carrying malformed JSON or truncated code is not a success, and
+        # rewarding it teaches the bandit to prefer exactly that model.
+        self._bandit_update(o, profile, ok=v_ok)
         outcome, outcome_source, outcome_detail = map_outcome(
             v_ok, v_reason, status="ok"
         )
         stat = "truncated" if v_reason == "truncated" else ("ok" if v_ok else "error")
-        reasoning_tokens = (
-            body.get("usage", {})
-            .get("completion_tokens_details", {})
-            .get("reasoning_tokens")
-        )
+        usage_body = body.get("usage") or {}
+        completion_details = usage_body.get("completion_tokens_details") or {}
+        reasoning_tokens = completion_details.get("reasoning_tokens")
         entry = AttemptLogEntry(
             request_id=req_id,
             attempt_no=attempt_no,
@@ -432,6 +633,8 @@ class Executor:
         profile: RequestProfile,
         backup: Candidate | None = None,
         meta: RouterMeta | None = None,
+        deadline: float | None = None,
+        share: float = 1.0,
     ) -> Attempt:
         """A whole candidate: retries on 5xx and key rotation on 429."""
         o = cand.offering
@@ -441,6 +644,8 @@ class Executor:
         first_call = True
 
         for _ in range(max(1, o.key_count)):
+            if self._left(deadline) < MIN_SLICE_S:
+                break
             key_index = self.ledger.pick_key(o, est)
             if key_index is None or key_index in tried:
                 # No free keys left: down the ladder.
@@ -448,14 +653,36 @@ class Executor:
             tried.add(key_index)
 
             for attempt in range(self.retries_per_provider):
+                slice_s = self._slice(deadline, share)
+                if slice_s < MIN_SLICE_S:
+                    self._counters["deadline_exceeded"] += 1
+                    return last or Attempt(
+                        error=ProviderError(
+                            Verdict.SWITCH, 504, "request deadline exceeded", 1.0
+                        ),
+                        offering=o,
+                    )
                 att_no = (meta.attempts if meta else 1) or 1
                 if first_call and backup is not None and self._hedge_allowed(req):
                     res = await self._call_with_hedge(
-                        o, req, profile, key_index, backup, meta, attempt_no=att_no
+                        o,
+                        req,
+                        profile,
+                        key_index,
+                        backup,
+                        meta,
+                        attempt_no=att_no,
+                        timeout=slice_s,
                     )
                 else:
                     res = await self._call(
-                        o, req, profile, key_index, meta=meta, attempt_no=att_no
+                        o,
+                        req,
+                        profile,
+                        key_index,
+                        meta=meta,
+                        attempt_no=att_no,
+                        timeout=slice_s,
                     )
                 first_call = False
                 if res.ok:
@@ -468,12 +695,17 @@ class Executor:
                 if exc.verdict is Verdict.FATAL:
                     return res
                 if exc.verdict is Verdict.SWITCH:
+                    # 429 / auth / retired model. The ledger blocks this key
+                    # for as long as the provider asked; the breaker is NOT
+                    # touched — being rate limited is not being unhealthy,
+                    # and counting it here used to open a live provider
+                    # after four refusals.
                     self.ledger.penalize(o, exc.retry_after_s, key_index)
-                    self.breaker.on_failure(o.provider)
                     break  # this key is out — try the next
+                # RETRY: 5xx, timeouts, connection errors. Health signal.
                 self.breaker.on_failure(o.provider)
                 if attempt + 1 < self.retries_per_provider:
-                    await self._backoff(attempt)
+                    await self._backoff(attempt, deadline)
         return last or Attempt(
             error=ProviderError(Verdict.SWITCH, 429, "quota exhausted", 60.0),
             offering=o,
@@ -490,7 +722,8 @@ class Executor:
             await asyncio.wait(tasks, timeout=2.0)
 
     def _hedge_delay(self, o: Offering) -> float:
-        return max(HEDGE_MIN_DELAY_S, o.ttft_p50_ms * HEDGE_TTFT_FACTOR / 1000.0)
+        ttft = self.latency.get(o.key, o.ttft_p50_ms) or o.ttft_p50_ms
+        return max(HEDGE_MIN_DELAY_S, ttft * HEDGE_TTFT_FACTOR / 1000.0)
 
     def _hedge_allowed(self, req: ChatRequest) -> bool:
         """A hedge is a second quota spend. Allowed for interactive and
@@ -511,6 +744,7 @@ class Executor:
         backup: Candidate,
         meta: RouterMeta | None,
         attempt_no: int = 1,
+        timeout: float | None = None,
     ) -> Attempt:
         """The first call of a candidate against a backup: the first to
         answer wins, the loser is canceled and returns the quota."""
@@ -523,6 +757,7 @@ class Executor:
                 meta=meta,
                 routing_source="l0",
                 attempt_no=attempt_no,
+                timeout=timeout,
             )
         )
         delay = self._hedge_delay(o)
@@ -546,6 +781,7 @@ class Executor:
                 meta=meta,
                 routing_source="hedge",
                 attempt_no=attempt_no + 1,
+                timeout=timeout,
             )
         )
         pending = {primary, hedge}
@@ -606,12 +842,36 @@ class Executor:
         self._counters["requests"] += 1
         candidates = plan[: self.max_attempts]
         last: ProviderError | None = None
+        # One budget for the whole ladder, not per attempt. Descending the
+        # ladder must never take longer than the answer is worth.
+        deadline = time.monotonic() + self.budget_for(req)
+        meta.deadline_s = round(self.budget_for(req), 1)
 
         for i, cand in enumerate(candidates):
+            if self._left(deadline) < MIN_SLICE_S:
+                self._counters["deadline_exceeded"] += 1
+                log.warning(
+                    "DEADLINE %.1fs exhausted after %d attempts (path %s)",
+                    self.budget_for(req),
+                    meta.attempts,
+                    ">".join(meta.fallback_path),
+                )
+                break
             meta.attempts += 1
             meta.fallback_path.append(cand.offering.key)
             backup = candidates[i + 1] if i + 1 < len(candidates) else None
-            res = await self._try_candidate(cand, req, profile, backup, meta)
+            # The last candidate may use everything that is left; the ones
+            # before it must leave room for it.
+            is_last = i == len(candidates) - 1
+            res = await self._try_candidate(
+                cand,
+                req,
+                profile,
+                backup,
+                meta,
+                deadline=deadline,
+                share=1.0 if is_last else ATTEMPT_SHARE,
+            )
 
             if res.ok and res.response is not None:
                 o = res.offering or cand.offering
@@ -622,20 +882,33 @@ class Executor:
                 res.response.router = meta
                 res.response.model = o.key
 
-                # Exploration: run a duplicate background request to an alternative candidate
+                # Exploration by duplicate call is off by default now: the
+                # router samples the bandit posterior when it selects, so
+                # exploration happens inside the choice instead of costing a
+                # second call. When it is switched back on it must at least
+                # not run while the alternative's quota is under pressure.
                 if (
                     self.enable_exploration
                     and random.random() < self.explore_rate
                     and len(plan) > 1
                 ):
-                    alt_candidates = [c for c in plan if c.offering.key != o.key]
+                    alt_candidates = [
+                        c
+                        for c in plan
+                        if c.offering.key != o.key
+                        and self.ledger.pressure(c.offering) < 0.5
+                    ]
                     if alt_candidates:
                         chosen_alt = random.choice(alt_candidates)
-                        asyncio.create_task(
+                        self._counters["explorations"] += 1
+                        task = asyncio.create_task(
                             self._run_exploration(
                                 chosen_alt, req, profile, meta.request_id or ""
                             )
                         )
+                        # asyncio keeps only a weak reference to a bare task.
+                        self._background.add(task)
+                        task.add_done_callback(self._background.discard)
 
                 return res.response
 
@@ -683,6 +956,7 @@ class Executor:
             ttft_budget = self.timeout_s if o.is_local else max(25.0, self._hedge_delay(o) * 5)
             t0 = time.perf_counter()
             try:
+                usage_tracker = _StreamUsageTracker()
                 stream = self.adapter.stream(
                     o,
                     req,
@@ -712,25 +986,56 @@ class Executor:
                         meta.provider, meta.model = o.provider, o.model_id
                         meta.key_index = key_index
                         self.breaker.on_success(o.provider)
+                        self.rate_governor.on_success(o, key_index)
+                        # TTFT measured for real — the streaming path is the
+                        # only place where it can be.
+                        self.latency.observe(o.key, (time.perf_counter() - t0) * 1000)
                         log.debug(
                             "stream %s ttft=%.0fms",
                             o.key,
                             (time.perf_counter() - t0) * 1000,
                         )
-                    self._sniff_stream_cost(o, chunk)
+                    usage_tracker.feed(chunk)
                     yield chunk
+                usage_tracker.finish()
+                usage_body = usage_tracker.body or {}
+                (
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    actual_cost,
+                    usage_measured,
+                ) = self._usage_details(o, usage_body)
+                if usage_body:
+                    self._check_billed(o, usage_body)
+                self.ledger.commit(
+                    o, est, total_tokens if usage_measured else est, key_index
+                )
                 self.telemetry.log_attempt(
-                    o.key, profile, ok=True, verdict="ok_stream", key_index=key_index
+                    o.key,
+                    profile,
+                    ok=True,
+                    verdict="ok_stream",
+                    tokens=total_tokens,
+                    key_index=key_index,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    actual_cost_usd=actual_cost,
+                    usage_measured=usage_measured,
                 )
                 self._bandit_update(o, profile, ok=True)
                 return
             except ProviderError as exc:
                 last = exc
                 self.ledger.commit(o, est, 0, key_index)
-                self.breaker.on_failure(o.provider)
-                self._bandit_update(o, profile, ok=False)
                 if exc.verdict is Verdict.SWITCH:
                     self.ledger.penalize(o, exc.retry_after_s, key_index)
+                    if exc.status == 429:
+                        self.rate_governor.on_rate_limit(o, key_index)
+                else:
+                    self.breaker.on_failure(o.provider)
+                if exc.status in (408, 504):
+                    self.latency.observe(o.key, (time.perf_counter() - t0) * 1000)
                 self.telemetry.log_attempt(
                     o.key,
                     profile,
@@ -753,6 +1058,10 @@ class Executor:
             "requests": self._counters["requests"],
             "hedges": self._counters["hedges"],
             "billed": self._counters["billed"],
+            "deadline_exceeded": self._counters["deadline_exceeded"],
+            "explorations": self._counters["explorations"],
+            "inflight": dict(self.inflight),
+            "rate_limits": self.rate_governor.snapshot(),
             "hedge_rate": round(
                 self._counters["hedges"] / self._counters["requests"], 3
             )

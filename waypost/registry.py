@@ -12,7 +12,9 @@ it is small, and the hot path must not hit the database.
 """
 from __future__ import annotations
 
+import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,6 +22,8 @@ import yaml
 
 from . import keychain, pricing
 from .schemas import Capability, Tier
+
+log = logging.getLogger("waypost.registry")
 
 
 @dataclass
@@ -76,6 +80,22 @@ class Offering:
 
     weight: float = 1.0  # manual preference multiplier
     enabled: bool = True
+
+    # Lifecycle. An offering is not simply present or absent: a model that
+    # answered 403 once may be back in an hour, and a model discovery
+    # invented five minutes ago has not earned production traffic yet.
+    #   active     — in the routing pool
+    #   candidate  — just discovered, not probed, must not take traffic
+    #   shadow     — probed and plausible, allowed a small share
+    #   quarantine — failed twice / vanished from /models, retried daily
+    lifecycle: str = "active"
+    # How many consecutive discovery cycles this model was missing from the
+    # provider's /models. Three (~36 h) means retired, one means a blip.
+    miss_streak: int = 0
+    # Consecutive dead probes. One is not evidence — proxies return 404 and
+    # gateways return 403 for reasons that pass.
+    dead_streak: int = 0
+    quarantined_at: float = 0.0
 
     # A manifest entry says that a local model may exist; it does not prove
     # that its process is listening right now.  Production manifest entries
@@ -159,6 +179,11 @@ class Offering:
         missing, the offering is not used. Silently getting a 401 on
         every request is worse than not having the candidate at all."""
         if not self.enabled:
+            return False
+        # candidate: discovered but never measured. quarantine: proven
+        # broken twice. Neither may serve a user request; both are still
+        # in the registry so the control plane can re-check them.
+        if self.lifecycle in ("candidate", "quarantine"):
             return False
         if self.is_local and not self.runtime_available:
             return False
@@ -324,6 +349,51 @@ class Registry:
         if low == "local":
             return [o for o in self.usable() if o.is_local]
         return [o for o in self.usable() if o.provider.lower() == low]
+
+    def transition(self, key: str, to: str, reason: str = "") -> bool:
+        """Move an offering between lifecycle states. Returns True on a
+        real change, so callers can log only what happened."""
+        o = self._offerings.get(key)
+        if o is None or o.lifecycle == to:
+            return False
+        was = o.lifecycle
+        o.lifecycle = to
+        if to == "quarantine":
+            o.quarantined_at = time.time()
+        elif to in ("active", "shadow"):
+            o.quarantined_at = 0.0
+            o.dead_streak = 0
+            o.miss_streak = 0
+        # Weight follows the state: shadow gets a small share of traffic,
+        # not a coin flip against a proven model.
+        if to == "shadow":
+            o.weight = min(o.weight, 0.2)
+        elif to == "active" and was == "shadow":
+            o.weight = 0.8
+        log.info("lifecycle %s: %s → %s%s", key, was, to, f" ({reason})" if reason else "")
+        return True
+
+    def by_lifecycle(self, *states: str) -> list["Offering"]:
+        return [o for o in self._offerings.values() if o.lifecycle in states]
+
+    def quarantined(self, older_than_s: float = 86_400) -> list["Offering"]:
+        """Quarantined long enough to be worth one resurrection probe.
+
+        A model marked dead used to stay dead forever: the probe job
+        targets usable() offerings, and a disabled one is not usable, so
+        nothing ever re-checked it.
+        """
+        cutoff = time.time() - older_than_s
+        return [
+            o
+            for o in self._offerings.values()
+            if o.lifecycle == "quarantine"
+            and o.quarantined_at
+            and o.quarantined_at <= cutoff
+            # A model proven to bill is never resurrected: a billing
+            # record outranks any later claim of being free.
+            and not (not o.free and o.free_source == pricing.Source.BILLED.value)
+        ]
 
     def apply_probe(self, key: str, **measured) -> None:
         """Probe results flow into the registry without a reload."""

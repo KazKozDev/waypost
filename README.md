@@ -71,6 +71,9 @@ client.chat.completions.create(
     model="auto",                       # the choice is left to the router
     messages=[{"role": "user", "content": "hi"}],
 )
+
+# The newer Responses API uses the same router and provider fallback path.
+client.responses.create(model="auto", input="hi")
 ```
 
 Without a single key the server still works: all traffic goes to the
@@ -126,6 +129,22 @@ TTFT, a second one starts, the first to answer wins, the loser is
 canceled **and returns the reserved quota**. The hedge is bounded to 5%
 of requests: it is a second quota spend, not a free speedup.
 
+The whole ladder runs inside **one wall-clock budget** (20 s interactive,
+12 s code completion, 300 s batch), and each candidate may spend only a
+share of what is left — so the local rung, the one that always answers,
+still gets its turn instead of a 502.
+
+Two failure contours, deliberately separate:
+
+* **Health** — 5xx, timeouts, connection errors. Opens the circuit breaker.
+* **Rate limits** — 429. Blocks the *key* until `Retry-After` and teaches
+  the governor the provider's real rpm (two refusals in a minute shrink
+  the admitted rate by 25%, a calm five minutes give 10% back). Never
+  opens the breaker: being throttled is not being sick.
+
+Neither of them touches the bandit. Its reward is the **verifier's
+verdict** — a 200 carrying malformed JSON is not a success.
+
 ## API extensions
 
 On top of the OpenAI spec (not forwarded to providers):
@@ -148,6 +167,7 @@ debugging turns into guesswork.
 | Method | Path | Why |
 |---|---|---|
 | POST | `/v1/chat/completions` | the main one, including SSE streaming |
+| POST | `/v1/responses` | Responses API compatibility, function calls and SSE streaming |
 | POST | `/v1/embeddings` | local embeddings, 25 ms microbatching |
 | POST | `/v1/rerank` | RAG chunk selection with a cross-encoder |
 | POST | `/v1/batches` | an offline job (inline or JSONL) |
@@ -385,7 +405,11 @@ waypost report --days 7          # telemetry report
 Metrics: `waypost_requests_total`, `waypost_latency_ms` (a histogram
 per provider), `waypost_quota_remaining`, `waypost_breaker_state`,
 `waypost_cache_hit_rate`, `waypost_escalations_total`,
-`waypost_hedges_total`, `waypost_guard_total`, `waypost_tokens_total`.
+`waypost_hedges_total`, `waypost_guard_total`, `waypost_tokens_total`,
+`waypost_latency_ema_ms` and `waypost_latency_drift_ratio` (a ratio above
+~2.5 is a provider degrading while still answering 200),
+`waypost_learned_rpm`, `waypost_inflight`, `waypost_pool_size` by
+lifecycle state.
 
 The terminal logs say what happened:
 
@@ -458,7 +482,10 @@ a 429 switches without a retry, a 5xx retries twice and switches, a 400
 fails at once, key exhaustion moves to the second key of the same
 provider, `privacy: strict` does not touch the cloud under any scoring,
 a canceled hedge returns the quota, the local model does not run two
-generations at once.
+generations at once, planning does not consume the breaker's half-open
+probe token, a 429 does not open the breaker while a 5xx does, the ladder
+respects its deadline and still reaches the local fallback, a model is
+quarantined only after two dead probes and can come back from it.
 
 ## Installing extras
 

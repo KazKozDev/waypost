@@ -262,8 +262,48 @@ def _offering_from_openrouter(
         limit_tpm=provider.limit_tpm,
         quality_score=0.5,  # starting point; probe will refine
         ttft_p50_ms=2000.0,
-        weight=0.8,  # auto-discovered — slightly below curated
+        weight=0.0,  # earns weight by passing a probe
+        # Quarantine on arrival. A model discovered thirty seconds ago has
+        # a made-up quality score and an unmeasured TTFT; letting it into
+        # the pool means it can win a plan on invented numbers.
+        lifecycle="candidate",
     )
+
+
+# A model missing from /models for this many consecutive discovery cycles
+# is retired, not blipping. At the default 12 h interval that is ~36 h.
+MISS_STREAK_LIMIT = 3
+
+
+def _apply_gone(
+    registry: Registry, provider_name: str, remote_ids: set[str]
+) -> dict[str, list[str]]:
+    """Act on models the provider stopped listing.
+
+    This list used to be computed, returned in the summary, printed by the
+    CLI — and never applied. Retired models stayed in the pool forever,
+    each one eating a rung of the fallback ladder on the way to a 404.
+
+    One missing cycle is not evidence: providers rotate /models pages, and
+    a partial response would otherwise wipe the pool.
+    """
+    retired: list[str] = []
+    missing: list[str] = []
+    for o in registry.all():
+        if o.provider != provider_name or o.is_local:
+            continue
+        if o.model_id in remote_ids:
+            if o.miss_streak:
+                o.miss_streak = 0
+            continue
+        o.miss_streak += 1
+        missing.append(o.key)
+        if o.miss_streak >= MISS_STREAK_LIMIT and o.lifecycle != "quarantine":
+            registry.transition(
+                o.key, "quarantine", f"absent from /models x{o.miss_streak}"
+            )
+            retired.append(o.key)
+    return {"retired": retired, "missing": missing}
 
 
 def _recheck_prices(
@@ -386,12 +426,13 @@ async def discover_provider(
 
     # Other cloud providers: liveness check + price demotion
     remote_ids = {m.get("id", "") for m in remote}
-    gone = sorted(known - remote_ids)
+    gone = _apply_gone(registry, provider.provider, remote_ids)
     return {
         "provider": provider.provider,
         "status": "ok",
         "known": len(known),
-        "gone": gone,
+        "gone": gone["retired"],
+        "missing": gone["missing"],
         "demoted": demoted,
     }
 

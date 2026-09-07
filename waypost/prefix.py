@@ -111,4 +111,9 @@ def build_payload(
         # Ask to return the request cost: without this usage.cost is not
         # sent, and the executor's watchdog has nothing to check.
         payload["usage"] = {"include": True}
+    if stream and not o.is_local:
+        # OpenAI-compatible providers normally emit usage only in the final
+        # SSE event when explicitly requested. The adapter retries without
+        # this optional field when a provider does not support it.
+        payload["stream_options"] = {"include_usage": True}
     return payload

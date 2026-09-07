@@ -240,6 +240,7 @@ BASELINE_PRICING_PER_1M: dict[str, tuple[float, float]] = {
     "M": (3.00, 15.00),
     "L": (15.00, 60.00),
 }
+BASELINE_NAME = "Waypost commercial baseline v1"
 
 
 def baseline_cost(prompt_tokens: int, completion_tokens: int, tier: str = "M") -> float:

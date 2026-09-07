@@ -108,6 +108,10 @@ class RouterMeta(BaseModel):
     approximate: bool = False
     policy: dict[str, Any] = Field(default_factory=dict)
     latency_ms: int = 0
+    # Wall-clock budget the ladder was given for this request. Makes a
+    # 504 readable: the client can see it was cut off, not that every
+    # provider refused.
+    deadline_s: float = 0.0
     routing_profile: str | None = None
     routing_source: str | None = None
     request_id: str | None = None

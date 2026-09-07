@@ -27,7 +27,7 @@ import httpx
 
 from .providers.openai_compat import OpenAICompatAdapter, ProviderError
 from .registry import Offering, Registry
-from .schemas import ChatMessage, ChatRequest
+from .schemas import Capability, ChatMessage, ChatRequest
 
 log = logging.getLogger("waypost.probe")
 
@@ -269,12 +269,22 @@ def latest(
     return out
 
 
+# Two consecutive dead probes before an offering leaves the pool. One is
+# not evidence: gateways return 403 during a rotation, proxies return 404
+# for a model that is merely cold, and a single bad minute used to remove
+# a working model permanently.
+DEAD_STREAK_LIMIT = 2
+
+
 def apply_to_registry(registry: Registry, probes: dict[str, dict[str, Any]]) -> int:
     """A measurement overrides the manifest — that is the whole point of
     probing.
 
-    A dead offering is disabled: getting a 401 on every request is worse
-    than not having the candidate.
+    Death is a streak, not an event, and it leads to quarantine rather
+    than to ``enabled = False``. The old flag was a one-way door: the
+    probe job targets usable() offerings, a disabled one is not usable,
+    so nothing ever re-checked it and a transient 403 removed the model
+    for the life of the process.
     """
     applied = 0
     for key, r in probes.items():
@@ -284,11 +294,35 @@ def apply_to_registry(registry: Registry, probes: dict[str, dict[str, Any]]) -> 
         measured: dict[str, Any] = {}
         if r.get("ttft_p50_ms"):
             measured["ttft_p50_ms"] = float(r["ttft_p50_ms"])
-        if r.get("status") == "dead":
-            measured["enabled"] = False
         for field in ("limit_rpm", "limit_rpd", "limit_tpm"):
             if r.get(field):
                 measured[field] = int(r[field])
+        # Declared capabilities are not working capabilities. The canary
+        # is the only thing that knows the difference.
+        if r.get("supports_tools") is False and Capability.TOOLS in o.caps:
+            o.caps = o.caps - {Capability.TOOLS}
+            applied += 1
+        if r.get("supports_json") is False and Capability.JSON in o.caps:
+            o.caps = o.caps - {Capability.JSON}
+            applied += 1
+
+        status = r.get("status")
+        if status == "dead":
+            o.dead_streak += 1
+            if o.dead_streak >= DEAD_STREAK_LIMIT:
+                registry.transition(
+                    key, "quarantine", f"dead probe x{o.dead_streak}"
+                )
+        elif status == "healthy":
+            o.dead_streak = 0
+            if o.lifecycle in ("candidate", "shadow", "quarantine"):
+                # Passed a live probe: candidates graduate to shadow and
+                # earn full traffic later, quarantined models come back.
+                registry.transition(
+                    key,
+                    "active" if o.lifecycle == "shadow" else "shadow",
+                    "probe healthy",
+                )
         if measured:
             registry.apply_probe(key, **measured)
             applied += 1

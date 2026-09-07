@@ -175,6 +175,10 @@ class Telemetry:
         ("key_index", "INTEGER DEFAULT 0"),
         ("escalated", "INTEGER DEFAULT 0"),
         ("verify_reason", "TEXT"),
+        ("prompt_tokens", "INTEGER"),
+        ("completion_tokens", "INTEGER"),
+        ("actual_cost_usd", "REAL"),
+        ("usage_measured", "INTEGER DEFAULT 0"),
     )
 
     def _migrate(self, c: sqlite3.Connection) -> None:
@@ -182,6 +186,13 @@ class Telemetry:
         for name, decl in self._EXTRA_COLUMNS:
             if name not in have:
                 c.execute(f"ALTER TABLE attempts ADD COLUMN {name} {decl}")
+        # Older non-streaming rows already contain provider-reported total
+        # tokens. Preserve that useful coverage without pretending that the
+        # unavailable input/output split can be reconstructed exactly.
+        c.execute(
+            "UPDATE attempts SET usage_measured = 1 "
+            "WHERE usage_measured = 0 AND ok = 1 AND tokens > 0"
+        )
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -201,6 +212,10 @@ class Telemetry:
         key_index: int = 0,
         escalated: bool = False,
         verify_reason: str | None = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        actual_cost_usd: float | None = None,
+        usage_measured: bool = False,
     ) -> None:
         row = (
             time.time(),
@@ -219,14 +234,19 @@ class Telemetry:
             key_index,
             int(escalated),
             verify_reason,
+            prompt_tokens,
+            completion_tokens,
+            actual_cost_usd,
+            int(usage_measured),
         )
         with self._lock, self._conn() as c:
             c.execute(
                 "INSERT INTO attempts (ts, offering, task_class, tier, "
                 "complexity, confidence, classifier_source, est_tokens, "
                 "tokens, ok, verdict, latency_ms, hedged, key_index, "
-                "escalated, verify_reason) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "escalated, verify_reason, prompt_tokens, completion_tokens, "
+                "actual_cost_usd, usage_measured) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 row,
             )
 
@@ -300,6 +320,23 @@ class Telemetry:
                 (since,),
             ).fetchall()
         return {r[0]: r[1] for r in rows if r[2] >= 5}
+
+    def attempt_counts(self, window_s: float = 86_400) -> dict[str, tuple[int, float]]:
+        """(attempts, success rate) per offering.
+
+        success_rates() drops anything with fewer than five attempts, which
+        is right for scoring but wrong for lifecycle decisions: promoting a
+        shadow model needs to know it carried enough traffic to be judged
+        at all.
+        """
+        since = time.time() - window_s
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT offering, COUNT(*), AVG(ok) FROM attempts "
+                "WHERE ts > ? GROUP BY offering",
+                (since,),
+            ).fetchall()
+        return {r[0]: (int(r[1]), float(r[2] or 0.0)) for r in rows}
 
     def cascade_stats(self, window_s: float = 7 * 86_400) -> dict:
         """Share of verifier failures on the lower tier.
@@ -408,41 +445,79 @@ class Telemetry:
         }
 
     def savings_stats(self, window_s: float = 30 * 86_400) -> dict:
-        """Estimated dollars saved by routing to free tiers vs commercial models."""
+        """Savings and token totals with explicit measurement coverage.
+
+        Legacy rows can have an exact provider-reported total but no input/output
+        split. They remain in the estimate using the historical 75/25 split and
+        are reported separately from fully measured rows.
+        """
         from . import pricing
 
         since = time.time() - window_s
         with self._conn() as c:
             rows = c.execute(
-                "SELECT tier, SUM(tokens), COUNT(*) FROM attempts "
-                "WHERE ts > ? AND ok = 1 GROUP BY tier",
-                (since,),
-            ).fetchall()
-            total_attempts, total_tokens = c.execute(
-                "SELECT COUNT(*), COALESCE(SUM(tokens), 0) FROM attempts "
+                "SELECT tier, tokens, prompt_tokens, completion_tokens, "
+                "actual_cost_usd, usage_measured FROM attempts "
                 "WHERE ts > ? AND ok = 1",
                 (since,),
-            ).fetchone()
+            ).fetchall()
 
         total_saved = 0.0
-        by_tier = {}
+        total_tokens = 0
+        measured_requests = 0
+        exact_savings_requests = 0
+        estimated_savings_requests = 0
+        by_tier: dict[str, dict] = {}
         for r in rows:
             tier_name = r[0] or "M"
-            tokens = r[1] or 0
-            prompt_tok = int(tokens * 0.75)
-            comp_tok = tokens - prompt_tok
-            saved = pricing.calculate_savings(prompt_tok, comp_tok, tier_name)
+            tokens = int(r[1] or 0)
+            prompt_tok, comp_tok = r[2], r[3]
+            actual_cost = r[4]
+            measured = bool(r[5])
+            total_tokens += tokens
+            measured_requests += int(measured)
+
+            exact = prompt_tok is not None and comp_tok is not None
+            if exact:
+                exact_savings_requests += 1
+                prompt_tok, comp_tok = int(prompt_tok), int(comp_tok)
+            elif tokens > 0:
+                estimated_savings_requests += 1
+                prompt_tok = int(tokens * 0.75)
+                comp_tok = tokens - prompt_tok
+            else:
+                prompt_tok = comp_tok = 0
+
+            # Waypost routes only offerings proven free. New rows persist a
+            # zero here explicitly; legacy rows predate cost accounting and
+            # retain the old zero-cost estimate.
+            saved = pricing.calculate_savings(
+                prompt_tok, comp_tok, tier_name, actual_cost or 0.0
+            )
             total_saved += saved
-            by_tier[tier_name] = {
-                "tokens": tokens,
-                "saved_usd": round(saved, 4),
-                "requests": r[2],
-            }
+            bucket = by_tier.setdefault(
+                tier_name, {"tokens": 0, "saved_usd": 0.0, "requests": 0}
+            )
+            bucket["tokens"] += tokens
+            bucket["saved_usd"] += saved
+            bucket["requests"] += 1
+
+        for bucket in by_tier.values():
+            bucket["saved_usd"] = round(bucket["saved_usd"], 4)
+
+        total_attempts = len(rows)
+        coverage = measured_requests / total_attempts if total_attempts else 1.0
 
         return {
             "total_saved_usd": round(total_saved, 2),
             "total_tokens": total_tokens,
             "total_requests": total_attempts,
+            "measured_requests": measured_requests,
+            "unmeasured_requests": total_attempts - measured_requests,
+            "usage_coverage_pct": round(coverage * 100, 1),
+            "exact_savings_requests": exact_savings_requests,
+            "estimated_savings_requests": estimated_savings_requests,
+            "baseline": pricing.BASELINE_NAME,
             "by_tier": by_tier,
         }
 

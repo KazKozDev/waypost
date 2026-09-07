@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     cache_ttl_s: int = 86_400
     request_timeout_s: float = 120.0
     max_attempts: int = 4
+    # Wall-clock budget for the WHOLE ladder, per latency class. Without
+    # these the worst case is max_attempts x retries x request_timeout_s.
+    deadline_interactive_s: float = 20.0
+    deadline_code_s: float = 12.0
+    deadline_batch_s: float = 300.0
+    deadline_reasoning_s: float = 90.0
+    # Thompson draw instead of the posterior mean when scoring: the noise
+    # is what keeps a burst from stampeding onto one provider.
+    stochastic_routing: bool = True
 
     # L1 classifier: requires `pip install model2vec` and a trained head.
     # Off by default — heuristics cover most cases.
@@ -56,7 +65,10 @@ class Settings(BaseSettings):
 
     # Exploration: duplicate 5-10% of requests to a 2nd random candidate in background
     # to avoid training bias on own policy.
-    enable_exploration: bool = True
+    # Off by default: the router now samples the bandit posterior when it
+    # picks, so exploration is part of the choice instead of a second call
+    # that spends free-tier quota for nothing.
+    enable_exploration: bool = False
     explore_rate: float = 0.10
     explore_floor: float = 0.02
 
@@ -130,8 +142,16 @@ class Settings(BaseSettings):
     compress_rate: float = 0.6
 
     # ---- control plane ----------------------------------------------
-    enable_probe: bool = False  # probing spends quota
+    # Probing spends quota — about one canary per offering per day, which
+    # is a fraction of a percent of any free tier. Leaving it off meant the
+    # whole measurement layer was dead: latency, real rate limits and
+    # working (as opposed to declared) capabilities all came from the
+    # manifest and never changed.
+    enable_probe: bool = True
     probe_interval_h: float = 24.0
+    # A quarantined offering gets one call after this long to prove it is
+    # back. Without a resurrection path the pool can only shrink.
+    resurrect_after_h: float = 24.0
     discovery_interval_h: float = 12.0
     health_interval_min: float = 5.0
     purge_interval_h: float = 6.0

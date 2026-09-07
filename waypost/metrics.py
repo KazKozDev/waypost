@@ -110,10 +110,43 @@ class Metrics:
 BREAKER_STATES = {"closed": 0, "half_open": 1, "open": 2}
 
 
-def gauges_from(ledger, breaker, caches: dict[str, Any]) -> Callable:
+LIFECYCLE_STATES = {"active": 0, "shadow": 1, "candidate": 2, "quarantine": 3}
+
+
+def gauges_from(
+    ledger,
+    breaker,
+    caches: dict[str, Any],
+    *,
+    latency=None,
+    rate_governor=None,
+    registry=None,
+    inflight: dict[str, int] | None = None,
+) -> Callable:
     """Wires metrics to the router's live state."""
 
     def source():
+        if latency is not None:
+            for key, st in latency.snapshot().items():
+                # The ratio, not the absolute: 6 s is awful for a 1B model
+                # and fine for a 70B one. >2.5 means silent degradation.
+                yield ("waypost_latency_ema_ms", {"offering": key}, st["ema_ms"])
+                yield ("waypost_latency_drift_ratio", {"offering": key}, st["ratio"])
+        if rate_governor is not None:
+            for slot, st in rate_governor.snapshot().items():
+                yield ("waypost_learned_rpm", {"slot": slot}, st["effective_rpm"])
+        if inflight:
+            for key, n in inflight.items():
+                yield ("waypost_inflight", {"offering": key}, n)
+        if registry is not None:
+            counts: dict[str, int] = {}
+            for o in registry.all():
+                counts[o.lifecycle] = counts.get(o.lifecycle, 0) + 1
+            for state in LIFECYCLE_STATES:
+                yield ("waypost_pool_size", {"state": state}, counts.get(state, 0))
+        yield from _core()
+
+    def _core():
         for offering, buckets in ledger.snapshot().items():
             for bucket, remaining in buckets.items():
                 yield (

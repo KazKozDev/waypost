@@ -114,7 +114,14 @@ def test_breaker_opens_then_half_opens():
 
     time.sleep(0.06)
     assert b.state("p") == "half_open"
-    assert b.allows("p")  # exactly one probe request
+    # allows()/can_admit() is a pure check now — the router calls it for
+    # every candidate while it is only planning, and taking the single
+    # probe token there stranded providers that were never called.
+    assert b.allows("p")
+    assert b.allows("p")
+    # The token is taken by the executor, at the real call.
+    token = b.acquire_probe("p")  # exactly one probe request
+    assert token is not None
     assert not b.allows("p")
     b.on_success("p")
     assert b.state("p") == "closed"

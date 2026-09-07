@@ -60,11 +60,14 @@ from .policy import Policy
 from .ensemble import fanout_ensemble, self_consistency_sample
 from .predictor import ModelQualityPredictor
 from .prefix import prefix_hash
+from .latency import LatencyTracker
+from .ratelimit import RateGovernor
 from .probe import apply_to_registry, latest as latest_probes
 from .probe import probe_all, store as store_probes, summarize_by_tier
 from .providers.openai_compat import OpenAICompatAdapter
 from .registry import Registry
 from .rerank import Reranker
+from .responses import ResponsesStreamTranslator, chat_to_response, responses_to_chat
 from .router import Router
 from .schemas import ChatRequest, RouterError, RouterMeta, Tier
 from .telemetry import AttemptLogEntry, Telemetry
@@ -141,6 +144,13 @@ async def lifespan(app: FastAPI):
 
     breaker = CircuitBreaker()
     bandit = Bandit(settings.db_path) if settings.enable_bandit else None
+    # Shared between router and executor: the executor measures, the router
+    # scores. Two copies would mean the router reading numbers nobody writes.
+    latency = LatencyTracker()
+    for o in registry.all():
+        latency.seed(o.key, o.ttft_p50_ms)
+    rate_governor = RateGovernor(ledger)
+    inflight: dict[str, int] = {}
     # A connection pool per process: TLS reuse noticeably cuts TTFT.
     client = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=64, max_keepalive_connections=32)
@@ -187,11 +197,20 @@ async def lifespan(app: FastAPI):
     app.state.metrics = Metrics()
     app.state.metrics.register_gauges(
         gauges_from(
-            ledger, breaker, {"exact": app.state.cache, "semantic": app.state.semantic}
+            ledger,
+            breaker,
+            {"exact": app.state.cache, "semantic": app.state.semantic},
+            latency=latency,
+            rate_governor=rate_governor,
+            registry=registry,
+            inflight=inflight,
         )
     )
     predictor = ModelQualityPredictor()
     app.state.predictor = predictor
+    app.state.latency = latency
+    app.state.rate_governor = rate_governor
+    app.state.inflight = inflight
     app.state.router = Router(
         registry,
         ledger,
@@ -199,6 +218,9 @@ async def lifespan(app: FastAPI):
         bandit,
         predictor=predictor,
         free_only=settings.free_only,
+        latency=latency,
+        inflight=inflight,
+        stochastic=settings.stochastic_routing,
     )
     app.state.executor = Executor(
         adapter,
@@ -213,6 +235,15 @@ async def lifespan(app: FastAPI):
         hedge_budget=settings.hedge_budget,
         enable_exploration=settings.enable_exploration,
         explore_rate=settings.explore_rate,
+        latency=latency,
+        rate_governor=rate_governor,
+        inflight=inflight,
+        deadlines={
+            "interactive": settings.deadline_interactive_s,
+            "code_completion": settings.deadline_code_s,
+            "batch": settings.deadline_batch_s,
+            "reasoning": settings.deadline_reasoning_s,
+        },
     )
 
     # Phase A: eager embedding loading on startup
@@ -241,7 +272,20 @@ async def lifespan(app: FastAPI):
         return results
 
     async def job_probe():
+        # Three populations, not one:
+        #   usable     — keep the measurements fresh
+        #   candidate  — just discovered, must be measured before it may
+        #                take a single user request
+        #   quarantine — resurrection: a model removed on a bad day gets
+        #                one call a day to prove it is back. Without this
+        #                the pool only ever shrinks.
         targets = [o for o in registry.usable() if not o.is_local]
+        targets += [o for o in registry.by_lifecycle("candidate") if not o.is_local]
+        targets += [
+            o
+            for o in registry.quarantined(settings.resurrect_after_h * 3600)
+            if not o.is_local
+        ]
         if not targets:
             return []
         results = await probe_all(adapter, targets)
@@ -255,10 +299,33 @@ async def lifespan(app: FastAPI):
         rates = telemetry.success_rates(window_s=86_400)
         for key, rate in rates.items():
             registry.apply_probe(key, success_rate=rate)
+        # Persist the measured latency into the registry: it is what the
+        # manifest constant was always meant to approximate.
+        for key, st in latency.snapshot().items():
+            if st["samples"] >= 5:
+                registry.apply_probe(key, ttft_p50_ms=st["ema_ms"])
+        # Graduation: a shadow offering that has carried real traffic well
+        # earns full weight. Demotion the other way: an active one that
+        # stopped answering goes back to shadow rather than out of the
+        # pool, so it keeps a small share and can prove itself again.
+        promoted, demoted = [], []
+        counts = telemetry.attempt_counts(window_s=86_400)
+        for o in registry.by_lifecycle("shadow", "active"):
+            n, rate = counts.get(o.key, (0, 1.0))
+            if o.lifecycle == "shadow" and n >= 50 and rate >= 0.90:
+                if registry.transition(o.key, "active", f"{n} ok at {rate:.0%}"):
+                    promoted.append(o.key)
+            elif o.lifecycle == "active" and n >= 20 and rate < 0.80:
+                if registry.transition(o.key, "shadow", f"success rate {rate:.0%}"):
+                    demoted.append(o.key)
         local_results = await discover_local_backends(adapter, registry)
         return {
             "updated": len(rates),
+            "promoted": promoted,
+            "demoted": demoted,
             "breakers": breaker.snapshot(),
+            "rate_limits": rate_governor.snapshot(),
+            "latency": latency.snapshot(),
             "local_backends": local_results,
         }
 
@@ -337,6 +404,7 @@ class PathNormalizationMiddleware:
                     "models",
                     "embeddings",
                     "rerank",
+                    "responses",
                     "pricing",
                     "discovery",
                     "jobs",
@@ -2282,9 +2350,19 @@ async def run_job(name: str):
 
 
 def _build_stats_payload() -> dict:
+    registry = app.state.registry
+    pool: dict[str, int] = {}
+    for o in registry.all():
+        pool[o.lifecycle] = pool.get(o.lifecycle, 0) + 1
     return {
         "quota": app.state.ledger.snapshot(),
         "breakers": app.state.breaker.snapshot(),
+        # The signals the router now actually acts on. Without them in
+        # /v1/stats a degrading provider is only visible in the score.
+        "latency": app.state.latency.snapshot(),
+        "rate_limits": app.state.rate_governor.snapshot(),
+        "inflight": dict(app.state.inflight),
+        "pool": pool,
         "cache_hit_rate": round(app.state.cache.hit_rate(), 3),
         "semantic_hit_rate": round(app.state.semantic.hit_rate(), 3),
         "bandit": app.state.bandit.snapshot() if app.state.bandit else {},
@@ -3298,6 +3376,7 @@ async def setup_page(request: Request):
     ex = app.state.executor.snapshot()
     cascade_stats = app.state.telemetry.cascade_stats()
     local_offerings = [o for o in registry.all() if o.is_local]
+    savings = app.state.telemetry.savings_stats()
     setup_payload = {
         "subsystems": [
             {
@@ -3367,8 +3446,16 @@ async def setup_page(request: Request):
         },
         "beta_metric": _beta_metric(),
         "pricing": {
-            "saved_usd": app.state.telemetry.savings_stats().get("saved_usd", 0.0),
-            "total_tokens": app.state.telemetry.savings_stats().get("total_tokens", 0),
+            "saved_usd": savings.get("total_saved_usd", 0.0),
+            "total_tokens": savings.get("total_tokens", 0),
+            "usage_coverage_pct": savings.get("usage_coverage_pct", 0.0),
+            "measured_requests": savings.get("measured_requests", 0),
+            "total_requests": savings.get("total_requests", 0),
+            "exact_savings_requests": savings.get("exact_savings_requests", 0),
+            "estimated_savings_requests": savings.get(
+                "estimated_savings_requests", 0
+            ),
+            "baseline": savings.get("baseline", "Waypost commercial baseline v1"),
         },
     }
     return HTMLResponse(render_setup_html(setup_payload))
@@ -3459,6 +3546,97 @@ async def chat_completions(req: ChatRequest, request: Request):
         return StreamingResponse(gen(), media_type="text/event-stream")
 
     return await run_chat(req)
+
+
+@app.post("/v1/responses")
+async def responses_endpoint(request: Request, payload: dict = Body(...)):
+    """OpenAI Responses compatibility over Waypost's existing chat hot path.
+
+    The translation deliberately happens only at the protocol edge: policy,
+    caching, routing, quota accounting, verification and provider fallback are
+    exactly the same as for ``/v1/chat/completions``.
+    """
+    try:
+        req = responses_to_chat(payload)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": str(exc),
+                    "type": "invalid_request_error",
+                }
+            },
+        )
+
+    profile_hdr = request.headers.get(
+        "x-waypost-profile"
+    ) or request.query_params.get("profile")
+    if profile_hdr in (
+        "auto",
+        "code_completion",
+        "reasoning",
+        "privacy_only",
+        "balanced",
+    ):
+        req.profile = profile_hdr
+
+    idem = req.idempotency_key or request.headers.get("idempotency-key")
+
+    if not req.stream:
+        if idem:
+            store: IdempotencyStore = app.state.idempotency
+            async with store.lock(idem):
+                if (hit := store.get(idem)) is not None:
+                    hit["router"] = {**hit.get("router", {}), "replay": True}
+                    return chat_to_response(hit, payload)
+                body = await run_chat(req)
+                store.put(idem, body)
+                return chat_to_response(body, payload)
+        return chat_to_response(await run_chat(req), payload)
+
+    meta = RouterMeta()
+    profile = classify(
+        req,
+        enable_l1=settings.enable_l1_classifier,
+        head_path=str(settings.head_path),
+    )
+    decision = app.state.policy.apply(req, profile)
+    if decision.blocked:
+        raise RouterError(decision.block_reason, 400, meta)
+    meta.policy = decision.as_meta()
+    meta.task_class = profile.task_class
+    meta.complexity_tier = profile.tier.value
+    plan = app.state.router.plan(
+        req, profile, quality_floor=decision.quality_floor, prefix=prefix_hash(req)
+    )
+
+    upstream = app.state.executor.stream(req, profile, plan, meta).__aiter__()
+    try:
+        first_chunk = await upstream.__anext__()
+    except StopAsyncIteration:
+        first_chunk = b""
+    translator = ResponsesStreamTranslator(payload)
+
+    async def gen():
+        try:
+            for event in translator.start():
+                yield event
+            if first_chunk:
+                for event in translator.feed(first_chunk):
+                    yield event
+            async for chunk in upstream:
+                for event in translator.feed(chunk):
+                    yield event
+            for event in translator.finish():
+                yield event
+        finally:
+            aclose = getattr(upstream, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+    app.state.metrics.inc("waypost_requests_total", status="stream")
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.post("/v1/embeddings")
