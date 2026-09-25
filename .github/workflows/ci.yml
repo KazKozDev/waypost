@@ -26,6 +26,22 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
+  swarm:
+    runs-on: ubuntu-latest
+    env:
+      SWARMS_TELEMETRY_ON: "false"
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install optional swarm engine
+        run: pip install -e ".[dev,swarm]"
+      - name: Verify swarm and real Swarms adapter without provider calls
+        run: python -m pytest tests/test_swarm.py -q
+
   discover:
     runs-on: ubuntu-latest
     env:

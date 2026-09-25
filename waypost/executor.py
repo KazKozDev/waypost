@@ -479,6 +479,11 @@ class Executor:
             # slowly can outlive any read timeout. The budget is enforced
             # here, where it is actually a deadline.
             body = await asyncio.wait_for(_do(), call_timeout)
+            # Some OpenAI-compatible upstreams answer HTTP 200 without a
+            # completion. Treat that as a failed candidate so the normal
+            # fallback ladder can try another model.
+            if not isinstance(body, dict) or not isinstance(body.get("choices"), list) or not body["choices"]:
+                raise ProviderError(Verdict.SWITCH, 502, "upstream returned no choices")
         except (asyncio.TimeoutError, TimeoutError) as exc:
             self.ledger.commit(o, est, 0, key_index)
             self._leave(o)

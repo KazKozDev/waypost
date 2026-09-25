@@ -82,7 +82,8 @@ from .responses import ResponsesStreamTranslator, chat_to_response, responses_to
 from .router import Router
 from .schemas import ChatRequest, RouterError, RouterMeta, Tier
 from .telemetry import AttemptLogEntry, Telemetry
-from .ui import render_chat_html, render_dashboard_html, render_setup_html
+from .ui import render_chat_html, render_dashboard_html, render_setup_html, render_swarm_html
+from .swarm.service import SwarmService
 from .verify import Verifier
 
 log = logging.getLogger("waypost.server")
@@ -229,6 +230,8 @@ async def lifespan(app: FastAPI):
     settings = Settings()
     setup_logging(settings.log_level)
     load_env()  # keys from .env → os.environ (the registry reads them)
+    app.state.swarm_service = SwarmService(settings.db_path.parent / "swarm-ui",
+                                           f"http://127.0.0.1:{settings.port}/v1")
 
     # Shared state first: whether a second instance is safe depends on it.
     shared = None
@@ -1941,6 +1944,7 @@ def _nav_header(active: str = "chat") -> str:
   </a>
   <nav class="nav-tabs">
     <a href="/chat" class="nav-tab {'active' if active == 'chat' else ''}">Chat</a>
+    <a href="/swarm" class="nav-tab {'active' if active == 'swarm' else ''}">Рой</a>
     <a href="/dashboard" class="nav-tab {'active' if active == 'dashboard' else ''}">Dashboard</a>
     <a href="/providers" class="nav-tab {'active' if active == 'providers' else ''}">Providers</a>
     <a href="/setup" class="nav-tab {'active' if active == 'setup' else ''}">Setup</a>
@@ -3638,6 +3642,80 @@ async function sendMessage() {
 async def chat_page(request: Request):
     """Interactive Anthropic Claude-style chat web interface."""
     return HTMLResponse(render_chat_html())
+
+
+@app.get("/swarm")
+async def swarm_page():
+    return HTMLResponse(render_swarm_html())
+
+
+@app.get("/v1/swarm/runs")
+async def swarm_runs():
+    return {"runs": app.state.swarm_service.list_runs()}
+
+
+@app.post("/v1/swarm/runs")
+async def swarm_create(payload: dict = Body(...)):
+    try:
+        run_id = app.state.swarm_service.create(
+            str(payload.get("task", "")), model=str(payload.get("model", "auto")),
+            privacy=str(payload.get("privacy", "normal")),
+            allow_python=bool(payload.get("allow_python", False)))
+        return app.state.swarm_service.status(run_id)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/swarm/runs/{run_id}")
+async def swarm_status(run_id: str):
+    try:
+        return app.state.swarm_service.status(run_id)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/v1/swarm/runs/{run_id}/events")
+async def swarm_events(run_id: str, offset: int = 0):
+    try:
+        return app.state.swarm_service.events(run_id, offset)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/swarm/runs/{run_id}/messages")
+async def swarm_message(run_id: str, payload: dict = Body(...)):
+    try:
+        app.state.swarm_service.message(run_id, str(payload.get("text", "")))
+        return app.state.swarm_service.status(run_id)
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/swarm/runs/{run_id}/pause")
+async def swarm_pause(run_id: str):
+    try:
+        app.state.swarm_service.pause(run_id)
+        return app.state.swarm_service.status(run_id)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/v1/swarm/runs/{run_id}/interrupt")
+async def swarm_interrupt(run_id: str):
+    try:
+        app.state.swarm_service.interrupt(run_id)
+        return app.state.swarm_service.status(run_id)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/v1/swarm/runs/{run_id}/resume")
+async def swarm_resume(run_id: str):
+    try:
+        app.state.swarm_service.resume(run_id)
+        return app.state.swarm_service.status(run_id)
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/dashboard")
