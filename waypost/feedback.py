@@ -26,7 +26,7 @@ tell the two apart from the outside. The numbers are meant to be nudges
 that accumulate over hundreds of requests, not verdicts on one.
 
 *Explicit beats inferred.* A rating through /v1/feedback is recorded at
-full weight and overrides whatever was inferred for that request.
+full weight; training prefers it over inferred reactions.
 
 *One verdict per answer.* The first signal for a request is the one that
 counts, so a long session cannot keep re-punishing the same answer.
@@ -147,6 +147,7 @@ class FeedbackCollector:
         self.enabled = enabled
         self._last: dict[str, Answered] = {}
         self._judged: set[str] = set()
+        self._explicit: set[str] = set()
         self._lock = threading.Lock()
         self._counts: dict[str, int] = {}
 
@@ -165,6 +166,7 @@ class FeedbackCollector:
             if len(self._last) >= self.limit:
                 self._last.clear()
                 self._judged.clear()
+                self._explicit.clear()
             self._last[session_id] = Answered(
                 request_id=request_id,
                 offering_key=offering_key,
@@ -209,15 +211,23 @@ class FeedbackCollector:
         if not self.enabled:
             return False
         with self._lock:
+            if signal.request_id in self._explicit:
+                return False
             if signal.request_id in self._judged and signal.source != "explicit":
                 return False
+            if signal.source == "explicit":
+                self._explicit.add(signal.request_id)
             self._judged.add(signal.request_id)
             if len(self._judged) > self.limit * 2:
                 self._judged.clear()
+                self._explicit.clear()
             self._counts[signal.kind] = self._counts.get(signal.kind, 0) + 1
 
         if self.bandit is not None and signal.offering_key:
-            self.bandit.update(signal.task_class, signal.offering_key, signal.reward)
+            self.bandit.update(
+                signal.task_class, signal.offering_key, signal.reward,
+                weight=1.0 if signal.source == "explicit" else 0.25,
+            )
         try:
             self.telemetry.log_feedback(
                 request_id=signal.request_id,
@@ -239,7 +249,7 @@ class FeedbackCollector:
         return True
 
     def rate(self, request_id: str, rating: str, session_id: str | None = None) -> bool:
-        """Explicit rating from a client. Overrides anything inferred."""
+        """Explicit rating from a client. Outweighs inferred reactions."""
         kind = "rated_good" if rating in ("good", "up", "1", "positive") else "rated_bad"
         target: Answered | None = None
         with self._lock:

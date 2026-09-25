@@ -24,6 +24,11 @@ certainty out of an accident.
 whose fit does not beat simply predicting the majority. The router then
 falls back to the prior, which is exactly the right outcome.
 
+Kept fits are additionally measured on a time-ordered cut (train on the
+past, test on the most recent rows) with Brier score and a small
+calibration table. Those are informational: on little data a time cut is
+noisy, so selection still uses the random-split lift.
+
     python -m scripts.train_predictor --db var/router.db --out var/predictor.json
 """
 from __future__ import annotations
@@ -83,6 +88,42 @@ def evaluate(X: np.ndarray, y: np.ndarray, coefs: np.ndarray, bias: float) -> fl
     return float(((p >= 0.5).astype(float) == y).mean())
 
 
+def predict_proba(X: np.ndarray, coefs: np.ndarray, bias: float) -> np.ndarray:
+    z = np.clip(X @ coefs + bias, -20, 20)
+    return 1.0 / (1.0 + np.exp(-z))
+
+
+def brier_score(p: np.ndarray, y: np.ndarray) -> float:
+    return float(np.mean((p - y) ** 2))
+
+
+def calibration_bins(
+    p: np.ndarray, y: np.ndarray, *, n_bins: int = 5
+) -> list[dict]:
+    """Per-bin (predicted mean, empirical rate, count).
+
+    Accuracy says whether the 0.5 cutoff separates the classes; routing
+    needs the probabilities themselves to mean what they say, so this is
+    reported alongside it. Empty bins are omitted.
+    """
+    out: list[dict] = []
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        mask = (p >= lo) & (p < hi if hi < 1.0 else p <= hi)
+        if int(mask.sum()) == 0:
+            continue
+        out.append(
+            {
+                "lo": round(float(lo), 2),
+                "hi": round(float(hi), 2),
+                "n": int(mask.sum()),
+                "mean_p": round(float(p[mask].mean()), 3),
+                "empirical": round(float(y[mask].mean()), 3),
+            }
+        )
+    return out
+
+
 def train(
     db: str | Path,
     out: str | Path,
@@ -104,6 +145,10 @@ def train(
     skipped: dict[str, str] = {}
 
     for offering, items in sorted(by_offering.items()):
+        # A new request representation or encoder is a different feature
+        # space even when the vector dimensions happen to match.
+        version = max(items, key=lambda i: i["ts"]).get("embedder_version", "")
+        items = [i for i in items if i.get("embedder_version", "") == version]
         if len(items) < min_rows:
             skipped[offering] = f"only {len(items)} rows"
             continue
@@ -111,11 +156,12 @@ def train(
         items = [i for i in items if len(i["embedding"]) == dim]
 
         X = np.array([i["embedding"] for i in items], dtype=float)
-        # The reward is continuous (the verifier's verdict averaged with
-        # user feedback); the label is whether it landed above the middle.
+        # Explicit feedback overrides mechanical checks upstream. Weak
+        # format checks and implicit reactions carry less training weight.
         y = np.array([1.0 if i["reward"] >= threshold else 0.0 for i in items])
         age_days = (now - np.array([i["ts"] for i in items])) / 86_400.0
         w = np.power(0.5, age_days / HALF_LIFE_DAYS)
+        w *= np.array([i.get("weight", 1.0) for i in items])
 
         base = y.mean()
         if base in (0.0, 1.0):
@@ -133,18 +179,38 @@ def train(
             skipped[offering] = f"no lift ({acc:.2f} vs base {base_acc:.2f})"
             continue
 
+        # Time-ordered check: a random holdout is optimistic under drift
+        # (models are swapped behind the same id, hosts degrade), so the
+        # same fit is also measured training on the past and testing on
+        # the most recent rows. Informational: selection still uses the
+        # random-split lift above, on small data a time cut is noisy.
+        ts = np.array([i["ts"] for i in items], dtype=float)
+        order = np.argsort(ts, kind="stable")
+        tcut = max(1, int(len(y) * HOLDOUT))
+        time_test = order[-tcut:]
+        time_p = predict_proba(X[time_test], coefs, bias)
+        time_acc = evaluate(X[time_test], y[time_test], coefs, bias)
+        brier = brier_score(predict_proba(X[test], coefs, bias), y[test])
+        time_brier = brier_score(time_p, y[time_test])
+
         models[offering] = {
             "bias": bias,
             "coefs": [round(float(c), 6) for c in coefs],
-            "n": len(items),
+            "n": float(w[train_idx].sum()),
             "accuracy": round(acc, 3),
             "base_rate": round(float(base), 3),
+            "time_accuracy": round(float(time_acc), 3),
+            "brier": round(float(brier), 4),
+            "time_brier": round(float(time_brier), 4),
+            "calibration": calibration_bins(time_p, y[time_test]),
             "dim": dim,
+            "embedder_version": version,
         }
         if verbose:
             print(
                 f"  {offering}: n={len(items)} acc={acc:.2f} "
-                f"(base {base_acc:.2f}) pass_rate={base:.2f}"
+                f"(base {base_acc:.2f}) time_acc={time_acc:.2f} "
+                f"brier={brier:.3f} pass_rate={base:.2f}"
             )
 
     payload = {

@@ -44,7 +44,9 @@ class NeighborIndex:
         min_neighbors: int = 4,
         full_trust_n: int = 12,
         half_life_days: float = 14.0,
+        embedding_version: str = "",
     ):
+        self.embedding_version = embedding_version
         self.capacity = capacity
         self.k = k
         # Fewer than this among the neighbours and the estimate is one or
@@ -56,6 +58,7 @@ class NeighborIndex:
         self._vectors: np.ndarray | None = None  # (n, dim), L2-normalised
         self._rewards: np.ndarray = np.zeros(0)
         self._ts: np.ndarray = np.zeros(0)
+        self._weights: np.ndarray = np.zeros(0)
         self._offerings: list[str] = []
         self._dim: int | None = None
         self._lock = threading.Lock()
@@ -66,7 +69,14 @@ class NeighborIndex:
         n = np.linalg.norm(v, axis=-1, keepdims=True)
         return v / np.maximum(n, 1e-9)
 
-    def add(self, embedding: Any, offering: str, reward: float, ts: float = 0.0) -> bool:
+    def add(
+        self, embedding: Any, offering: str, reward: float, ts: float = 0.0,
+        *, weight: float = 1.0, embedding_version: str = "",
+    ) -> bool:
+        if self.embedding_version and embedding_version != self.embedding_version:
+            return False
+        if weight <= 0.0:
+            return False
         vec = np.asarray(embedding, dtype=np.float32).ravel()
         if vec.size == 0:
             return False
@@ -84,12 +94,14 @@ class NeighborIndex:
                 self._vectors = np.vstack([self._vectors, row])
             self._rewards = np.append(self._rewards, float(reward))
             self._ts = np.append(self._ts, ts or time.time())
+            self._weights = np.append(self._weights, min(1.0, weight))
             self._offerings.append(offering)
             if len(self._offerings) > self.capacity:
                 drop = len(self._offerings) - self.capacity
                 self._vectors = self._vectors[drop:]
                 self._rewards = self._rewards[drop:]
                 self._ts = self._ts[drop:]
+                self._weights = self._weights[drop:]
                 del self._offerings[:drop]
         return True
 
@@ -97,20 +109,22 @@ class NeighborIndex:
         """Fill from telemetry.training_rows() at startup."""
         added = 0
         for r in sorted(rows, key=lambda x: x.get("ts", 0.0)):
-            if self.add(r["embedding"], r["offering"], r["reward"], r.get("ts", 0.0)):
+            if self.add(r["embedding"], r["offering"], r["reward"], r.get("ts", 0.0), weight=r.get("weight", 1.0), embedding_version=r.get("embedder_version", "")):
                 added += 1
         if added:
             log.info("neighbors: %d past attempts indexed", added)
         return added
 
     # ------------------------------------------------------------ lookup
-    def estimate(self, embedding: Any) -> dict[str, tuple[float, float]]:
+    def estimate(self, embedding: Any, *, embedding_version: str = "") -> dict[str, tuple[float, float]]:
         """offering → (mean reward among neighbours, evidence weight).
 
         One pass for all offerings: the neighbourhood is found once and
         then split by who answered, which is both faster and fairer than
         asking per candidate.
         """
+        if self.embedding_version and embedding_version != self.embedding_version:
+            return {}
         with self._lock:
             if self._vectors is None or len(self._offerings) < self.min_neighbors:
                 return {}
@@ -118,6 +132,7 @@ class NeighborIndex:
             offerings = list(self._offerings)
             rewards = self._rewards
             ts = self._ts
+            evidence_weights = self._weights
 
         query = np.asarray(embedding, dtype=np.float32).ravel()
         if self._dim is None or query.size != self._dim:
@@ -138,7 +153,7 @@ class NeighborIndex:
             # model that has since been swapped behind the same id is
             # weak evidence about today.
             age_days = max(0.0, (now - float(ts[i])) / 86_400.0)
-            weight = sim * (0.5 ** (age_days / self.half_life_days))
+            weight = sim * (0.5 ** (age_days / self.half_life_days)) * float(evidence_weights[i])
             out.setdefault(offerings[i], []).append((float(rewards[i]), weight))
 
         estimates: dict[str, tuple[float, float]] = {}
@@ -147,14 +162,13 @@ class NeighborIndex:
             if total_w <= 0:
                 continue
             mean = sum(r * w for r, w in points) / total_w
-            # Trust grows with the number of neighbours, not their weight:
-            # ten near-identical rows from one burst are one observation
-            # wearing ten hats.
-            trust = min(1.0, len(points) / self.full_trust_n)
+            # Weak checks and stale/distant rows must not acquire the
+            # confidence of independent, directly rated answers.
+            trust = min(1.0, total_w / self.full_trust_n)
             estimates[offering] = (mean, trust)
         return estimates
 
-    def escalation_risk(self, embedding: Any) -> tuple[float, float]:
+    def escalation_risk(self, embedding: Any, *, embedding_version: str = "") -> tuple[float, float]:
         """(share of similar past requests that needed escalating, trust).
 
         The cascade is reactive: try the cheap model, verify, escalate.
@@ -167,7 +181,7 @@ class NeighborIndex:
         model: the question "did requests like this one work out" is the
         same question, read the other way round.
         """
-        est = self.estimate(embedding)
+        est = self.estimate(embedding, embedding_version=embedding_version)
         if not est:
             return 0.0, 0.0
         # Weight each offering's local success by how much of the
@@ -182,6 +196,7 @@ class NeighborIndex:
         with self._lock:
             return {
                 "rows": len(self._offerings),
+                "embedding_version": self.embedding_version,
                 "capacity": self.capacity,
                 "dim": self._dim,
                 "offerings": len(set(self._offerings)),

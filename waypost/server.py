@@ -45,7 +45,7 @@ from .bandit import Bandit
 from .batch import BatchQueue, BatchWorker, QuotaExhausted
 from .breaker import CircuitBreaker
 from .cache import ExactCache, SemanticCache, cacheable, canonical_key
-from .classify import classify, classify_l0
+from .classify import classify, classify_l0, routing_encoder
 from .compress import Compressor
 from .config import Settings, load_env
 from .control import ControlPlane
@@ -68,7 +68,7 @@ from .predictor import ModelQualityPredictor
 from .prefix import prefix_hash
 from .cluster import SharedState, connect as redis_connect
 from .experiment import Arm, Experiment, ExperimentRegistry, compare as compare_arms
-from .feedback import FeedbackCollector, Signal
+from .feedback import FeedbackCollector
 from .latency import LatencyTracker
 from .neighbors import NeighborIndex
 from .ratelimit import RateGovernor
@@ -80,7 +80,7 @@ from .registry import Registry
 from .rerank import Reranker
 from .responses import ResponsesStreamTranslator, chat_to_response, responses_to_chat
 from .router import Router
-from .schemas import ChatRequest, RouterError, RouterMeta, Tier
+from .schemas import ChatMessage, ChatRequest, RequestProfile, RouterError, RouterMeta, Tier
 from .telemetry import AttemptLogEntry, Telemetry
 from .ui import render_chat_html, render_dashboard_html, render_setup_html
 from .verify import Verifier
@@ -352,7 +352,10 @@ async def lifespan(app: FastAPI):
             inflight=inflight,
         )
     )
-    neighbors = NeighborIndex(capacity=settings.neighbor_capacity)
+    neighbors = NeighborIndex(
+        capacity=settings.neighbor_capacity,
+        embedding_version=routing_encoder(settings.enable_l1_classifier)[1],
+    )
     if settings.enable_neighbors:
         # Warm from the log: the index is useful from the first request
         # after a restart rather than after the next few hundred.
@@ -776,19 +779,15 @@ def _query_text(req: ChatRequest) -> str:
 def _namespace(profile, req: ChatRequest) -> str:
     """The semantic-cache namespace: compare only the comparable.
     A different system prompt or a different tools set is a different universe."""
-    return f"{profile.tier.value}:{profile.language}:{prefix_hash(req)}"
+    return f"cache-full-v2:{profile.tier.value}:{profile.language}:{prefix_hash(req)}"
 
 
 async def _embedding_for(req: ChatRequest, profile):
-    """A single request vector, always one-dimensional.
+    """Semantic-cache vector over the full request, separate from routing.
 
-    The embedding has two producers: the L1 classifier returns (D,), and
-    the microbatch service — a matrix (N, D). A shape mismatch dropped the
-    cosine in the semantic cache, so normalization lives here, in the single
-    point where both branches meet.
+    A bounded task view deliberately omits history; reusing it here would
+    make unrelated full conversations look like interchangeable answers.
     """
-    if profile.embedding is not None:
-        return profile.embedding
     svc = get_embeddings(app)
     try:
         vectors = await svc.aencode([_query_text(req)])
@@ -867,6 +866,8 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
     meta.task_class = profile.task_class
     meta.complexity_tier = profile.tier.value
     meta.classifier_source = profile.classifier_source
+    meta.task_subtype = profile.task_subtype
+    meta.representation_version = profile.representation_version
 
     # Multimodal split, before the caches: the cache key of the rewritten
     # text request is the one worth reusing, and it is shared with every
@@ -877,6 +878,13 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
         profile.est_input_tokens = fresh.est_input_tokens
         profile.est_output_tokens = fresh.est_output_tokens
         profile.required_caps = fresh.required_caps
+        # Keep policy/classification of the user's task, but refresh the
+        # vector for the rewritten request used by the text-model stage.
+        refreshed = classify(req, enable_l1=settings.enable_l1_classifier,
+                             head_path=str(settings.head_path))
+        profile.routing_text = refreshed.routing_text
+        profile.embedding = refreshed.embedding
+        profile.embedder_version = refreshed.embedder_version
 
     # L0: exact cache. Cheaper than any routing, so before it.
     key = canonical_key(req, model_class=profile.tier.value)
@@ -910,7 +918,7 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
             attempt_no=1,
             ts=time.time(),
             embedding=profile.embedding,
-            embedder_version="minishlab/potion-multilingual-128M",
+            embedder_version=profile.embedder_version,
             l0_labels={
                 "task_type": profile.task_class,
                 "tier": profile.tier.value,
@@ -989,7 +997,7 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
                     attempt_no=1,
                     ts=time.time(),
                     embedding=embedding,
-                    embedder_version="minishlab/potion-multilingual-128M",
+                    embedder_version=profile.embedder_version,
                     l0_labels={
                         "task_type": profile.task_class,
                         "tier": profile.tier.value,
@@ -1178,15 +1186,8 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
                     log.debug("fanout escalation failed: %s", exc)
 
     meta.registry_version = app.state.registry.version
-    # Feed the neighbourhood from live traffic, so "who handled requests
-    # like this one" includes what just happened.
-    if profile.embedding is not None and meta.provider:
-        app.state.neighbors.add(
-            profile.embedding,
-            f"{meta.provider}/{meta.model}",
-            0.0 if meta.escalated else 1.0,
-            time.time(),
-        )
+    # Each actual attempt feeds its own verifier evidence in Executor.
+    # An escalation says nothing about the quality of the final offering.
     app.state.router.remember(req.session_id, f"{meta.provider}/{meta.model}", prefix)
     # Remember what we answered, so the next request in this session can
     # be read as a judgement on it.

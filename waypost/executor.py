@@ -32,7 +32,7 @@ from typing import Any, AsyncIterator
 
 from . import pricing
 from .bandit import Bandit
-from .breaker import CircuitBreaker, ProbeToken
+from .breaker import CircuitBreaker
 from .latency import LatencyTracker
 from .ledger import Ledger
 from .ratelimit import RateGovernor
@@ -52,7 +52,7 @@ from .schemas import (
     Usage,
 )
 from .telemetry import AttemptLogEntry, Telemetry
-from .verify import Verifier, map_outcome
+from .verify import Verifier, map_outcome, quality_signal
 
 log = logging.getLogger("waypost.executor")
 
@@ -82,11 +82,33 @@ ATTEMPT_SHARE = 0.6
 
 
 class _StreamUsageTracker:
-    """Incrementally read usage from arbitrarily chunked SSE bytes."""
+    """Incrementally read usage from arbitrarily chunked SSE bytes.
+
+    Also taps the answer text (OpenAI-compat `choices[].delta.content`)
+    so a completed stream can be verified like a regular answer instead
+    of counted as a success for merely arriving. Anything that does not
+    look like chat deltas leaves `saw_chat_shape` false, and the stream
+    keeps the old treatment: delivered, but not quality evidence.
+    """
+
+    # Enough for any honest answer; a runaway stream must not grow
+    # memory without a bound.
+    MAX_TAPPED_CHARS = 512_000
 
     def __init__(self) -> None:
         self._buffer = b""
         self.body: dict[str, Any] | None = None
+        self._parts: list[str] = []
+        self._tapped_chars = 0
+        self.text_chars = 0
+        self.truncated_text = False
+        self.finish_reason: str | None = None
+        self.tool_deltas = 0
+        self.saw_chat_shape = False
+
+    @property
+    def text(self) -> str:
+        return "".join(self._parts)
 
     def feed(self, chunk: bytes) -> None:
         self._buffer += chunk
@@ -112,6 +134,43 @@ class _StreamUsageTracker:
             return
         if isinstance(body, dict) and isinstance(body.get("usage"), dict):
             self.body = body
+        choices = body.get("choices") if isinstance(body, dict) else None
+        if not isinstance(choices, list) or not choices:
+            return
+        first = choices[0]
+        if not isinstance(first, dict):
+            return
+        delta = first.get("delta")
+        if not isinstance(delta, dict):
+            if isinstance(first.get("message"), dict):
+                self.saw_chat_shape = True
+            return
+        self.saw_chat_shape = True
+        if isinstance(first.get("finish_reason"), str):
+            self.finish_reason = first["finish_reason"]
+        piece = delta.get("content")
+        if isinstance(piece, str) and piece:
+            self.text_chars += len(piece)
+            if not self.truncated_text:
+                room = self.MAX_TAPPED_CHARS - self._tapped_chars
+                if len(piece) <= room:
+                    self._parts.append(piece)
+                    self._tapped_chars += len(piece)
+                else:
+                    self._parts.append(piece[:room])
+                    self._tapped_chars += room
+                    self.truncated_text = True
+        calls = delta.get("tool_calls")
+        if isinstance(calls, list):
+            self.tool_deltas += len(calls)
+
+
+def _backend_of(o: Offering) -> str:
+    if "ollama" in o.provider.lower():
+        return "ollama"
+    if "mlx" in o.provider.lower():
+        return "mlx"
+    return "cloud" if not o.is_local else "local"
 
 
 def _detect_modality(req: ChatRequest) -> tuple[str, int, float, int | None]:
@@ -252,19 +311,6 @@ class Executor:
         return max(MIN_SLICE_S * 2, base * max(0.25, factor))
 
     # --------------------------------------------------------------- util
-    def _bandit_update(self, o: Offering, profile: RequestProfile, ok: bool) -> None:
-        """Quality evidence only.
-
-        The bandit estimates how good this model is at this task class.
-        A 429, a connection reset or a 5xx says nothing about that — those
-        belong to the rate governor and the circuit breaker. Feeding them
-        here made the router avoid whichever provider was merely busy, and
-        rewarding every HTTP 200 (as this used to, before the verifier
-        ran) taught it that a syntactically broken answer was a success.
-        """
-        if self.bandit is not None:
-            self.bandit.update(profile.task_class, o.key, 1.0 if ok else 0.0)
-
     ERROR_RUN_TRIGGER = 3
 
     def _note_error_run(self, o: Offering) -> None:
@@ -444,15 +490,7 @@ class Executor:
             if meta and meta.routing_source
             else profile.classifier_source
         )
-        backend = (
-            "ollama"
-            if "ollama" in o.provider.lower()
-            else (
-                "mlx"
-                if "mlx" in o.provider.lower()
-                else ("cloud" if not o.is_local else "local")
-            )
-        )
+        backend = _backend_of(o)
 
         async def _do() -> dict[str, Any]:
             if sem is not None:
@@ -479,7 +517,7 @@ class Executor:
             # slowly can outlive any read timeout. The budget is enforced
             # here, where it is actually a deadline.
             body = await asyncio.wait_for(_do(), call_timeout)
-        except (asyncio.TimeoutError, TimeoutError) as exc:
+        except (asyncio.TimeoutError, TimeoutError):
             self.ledger.commit(o, est, 0, key_index)
             self._leave(o)
             self.breaker.release_probe(probe)
@@ -548,7 +586,7 @@ class Executor:
                 attempt_no=attempt_no,
                 ts=time.time(),
                 embedding=profile.embedding,
-                embedder_version="minishlab/potion-multilingual-128M",
+                embedder_version=profile.embedder_version,
                 l0_labels={
                     "task_type": profile.task_class,
                     "tier": profile.tier.value,
@@ -620,10 +658,17 @@ class Executor:
         # The reward is the verifier's verdict, not the HTTP status. A 200
         # carrying malformed JSON or truncated code is not a success, and
         # rewarding it teaches the bandit to prefer exactly that model.
-        self._bandit_update(o, profile, ok=v_ok)
+        reward, weight = quality_signal(req, body, v_ok, v_reason)
+        if reward is not None:
+            if self.bandit is not None:
+                self.bandit.update(profile.task_class, o.key, reward, weight=weight)
+            if self.neighbors is not None and profile.embedding is not None:
+                self.neighbors.add(profile.embedding, o.key, reward, weight=weight, embedding_version=profile.embedder_version)
         outcome, outcome_source, outcome_detail = map_outcome(
             v_ok, v_reason, status="ok"
         )
+        outcome_detail["quality_reward"] = reward
+        outcome_detail["quality_weight"] = weight
         stat = "truncated" if v_reason == "truncated" else ("ok" if v_ok else "error")
         usage_body = body.get("usage") or {}
         completion_details = usage_body.get("completion_tokens_details") or {}
@@ -633,7 +678,7 @@ class Executor:
             attempt_no=attempt_no,
             ts=time.time(),
             embedding=profile.embedding,
-            embedder_version="minishlab/potion-multilingual-128M",
+            embedder_version=profile.embedder_version,
             l0_labels={
                 "task_type": profile.task_class,
                 "tier": profile.tier.value,
@@ -914,7 +959,7 @@ class Executor:
             return
         self._counters["shadows"] += 1
         try:
-            res = await self._call(
+            await self._call(
                 o,
                 req,
                 profile,
@@ -927,11 +972,8 @@ class Executor:
         except Exception as exc:  # noqa: BLE001 — a shadow must never surface
             log.debug("shadow call failed: %s", exc)
             return
-        if res.ok and self.neighbors is not None and profile.embedding is not None:
-            ok, _ = self.verifier.verify(
-                req, profile, res.response.model_dump() if res.response else {}
-            )
-            self.neighbors.add(profile.embedding, o.key, 1.0 if ok else 0.0)
+        # _call records evidence for this offering exactly once, just as
+        # it does for foreground attempts.
 
     def spawn_shadow(
         self, cand: Candidate, req: ChatRequest, profile: RequestProfile
@@ -1104,6 +1146,7 @@ class Executor:
             first_byte_sent = False
             ttft_budget = self.timeout_s if o.is_local else max(25.0, self._hedge_delay(o) * 5)
             t0 = time.perf_counter()
+            ttft_ms = 0
             try:
                 usage_tracker = _StreamUsageTracker()
                 stream = self.adapter.stream(
@@ -1138,7 +1181,8 @@ class Executor:
                         self.rate_governor.on_success(o, key_index)
                         # TTFT measured for real — the streaming path is the
                         # only place where it can be.
-                        self.latency.observe(o.key, (time.perf_counter() - t0) * 1000)
+                        ttft_ms = int((time.perf_counter() - t0) * 1000)
+                        self.latency.observe(o.key, ttft_ms)
                         log.debug(
                             "stream %s ttft=%.0fms",
                             o.key,
@@ -1160,11 +1204,55 @@ class Executor:
                 self.ledger.commit(
                     o, est, total_tokens if usage_measured else est, key_index
                 )
+                # A completed stream used to count as a success for merely
+                # arriving. The tracker tapped the answer text, so verify
+                # it like a regular answer: empty and truncated streams
+                # are failures, not quality evidence for anyone.
+                stream_body: dict[str, Any] | None = None
+                if usage_tracker.saw_chat_shape and self.verifier is not None:
+                    stream_body = {
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": usage_tracker.text,
+                                },
+                                "finish_reason": usage_tracker.finish_reason or "stop",
+                            }
+                        ],
+                    }
+                    if usage_body:
+                        stream_body["usage"] = usage_body
+                    v_ok, v_reason = self.verifier.verify(req, profile, stream_body)
+                else:
+                    v_ok, v_reason = (True, "") if self.verifier is None else (True, "unverified_shape")
+                if stream_body is not None:
+                    reward, weight = quality_signal(req, stream_body, v_ok, v_reason)
+                    if reward is not None:
+                        if self.bandit is not None:
+                            self.bandit.update(
+                                profile.task_class, o.key, reward, weight=weight
+                            )
+                        if self.neighbors is not None and profile.embedding is not None:
+                            self.neighbors.add(
+                                profile.embedding, o.key, reward, weight=weight,
+                                embedding_version=profile.embedder_version,
+                            )
+                else:
+                    reward, weight = None, 0.0
+                outcome, outcome_source, outcome_detail = map_outcome(
+                    v_ok, v_reason if v_reason != "unverified_shape" else "", status="ok"
+                )
+                outcome_detail["quality_reward"] = reward
+                outcome_detail["quality_weight"] = weight
+                outcome_detail["stream"] = True
+                if usage_tracker.truncated_text:
+                    outcome_detail["tap_truncated"] = True
                 self.telemetry.log_attempt(
                     o.key,
                     profile,
-                    ok=True,
-                    verdict="ok_stream",
+                    ok=v_ok,
+                    verdict="ok_stream" if v_ok else v_reason,
                     tokens=total_tokens,
                     key_index=key_index,
                     prompt_tokens=prompt_tokens,
@@ -1172,7 +1260,61 @@ class Executor:
                     actual_cost_usd=actual_cost,
                     usage_measured=usage_measured,
                 )
-                self._bandit_update(o, profile, ok=True)
+                req_id = (meta.request_id if meta and meta.request_id else None) or (
+                    f"req_{uuid.uuid4().hex[:12]}"
+                )
+                if meta and not meta.request_id:
+                    meta.request_id = req_id
+                modality, img_cnt, aud_dur, vis_bud = _detect_modality(req)
+                self.telemetry.log_attempt_row(
+                    AttemptLogEntry(
+                        request_id=req_id,
+                        attempt_no=(meta.attempts if meta else 1) or 1,
+                        ts=time.time(),
+                        embedding=profile.embedding,
+                        embedder_version=profile.embedder_version,
+                        l0_labels={
+                            "task_type": profile.task_class,
+                            "tier": profile.tier.value,
+                            "complexity": profile.complexity,
+                            "lang": profile.language,
+                            "requires": [c.value for c in profile.required_caps],
+                        },
+                        l1_prediction=getattr(meta, "l1_prediction", None) if meta else None,
+                        input_tokens=prompt_tokens or est,
+                        modality=modality,
+                        image_count=img_cnt,
+                        audio_duration_s=aud_dur,
+                        vision_token_budget=vis_bud,
+                        provider=o.provider,
+                        backend=_backend_of(o),
+                        model=o.model_id,
+                        model_version=getattr(o, "model_version", "") or "",
+                        tier=profile.tier.value,
+                        thinking_mode=bool(getattr(req, "thinking_mode", False)),
+                        routing_source=(
+                            meta.routing_source
+                            if meta and meta.routing_source
+                            else profile.classifier_source
+                        ),
+                        is_exploration=bool(getattr(meta, "is_exploration", False)),
+                        quota_remaining_pct=100.0,
+                        quota_window_reset_in_s=0,
+                        quota_binding_limit="requests",
+                        status="truncated" if v_reason == "truncated" else ("ok" if v_ok else "error"),
+                        error_class="",
+                        latency_ms=int((time.perf_counter() - t0) * 1000),
+                        ttft_ms=ttft_ms,
+                        output_tokens=completion_tokens,
+                        reasoning_tokens=None,
+                        peak_memory_mb=None,
+                        is_final=True,
+                        outcome=outcome,
+                        outcome_source=outcome_source,
+                        outcome_detail=outcome_detail,
+                        arm=meta.arm if meta else "",
+                    )
+                )
                 return
             except ProviderError as exc:
                 last = exc

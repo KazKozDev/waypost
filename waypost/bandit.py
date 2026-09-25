@@ -22,6 +22,7 @@ alpha+beta bounds how confident it is allowed to get.
 """
 from __future__ import annotations
 
+import logging
 import math
 import sqlite3
 import threading
@@ -30,8 +31,22 @@ from pathlib import Path
 
 import numpy as np
 
+log = logging.getLogger("waypost.bandit")
+
 DECAY_PER_HOUR = 0.995  # ≈ half-life of 5.8 days
 MAX_EVIDENCE = 200.0  # cap on alpha + beta
+
+# Evidence semantics version. v1 mixed delivery, format checks and user
+# dislike into one number (a completed stream was a success, an
+# escalation punished the model that finally answered, a "bad" rating
+# was averaged with automatic checks). v2 records per-attempt quality
+# rewards with evidence weights. The schema is shared with other tables
+# in the same file, so the stamp lives in its own meta table, not in
+# PRAGMA user_version.
+EVIDENCE_VERSION = 2
+# Stale evidence keeps its direction at a quarter of the confidence:
+# informative, but no longer allowed to outshout new observations.
+STALE_EVIDENCE_KEEP = 0.25
 
 
 class Bandit:
@@ -54,6 +69,7 @@ class Bandit:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             self._init_db()
             self._load()
+            self._migrate_evidence()
 
     # ---------------------------------------------------------------- db
     def _conn(self) -> sqlite3.Connection:
@@ -84,6 +100,9 @@ class Bandit:
             cols = {r[1] for r in c.execute("PRAGMA table_info(bandit)")}
             if "ts" not in cols:
                 c.execute("ALTER TABLE bandit ADD COLUMN ts REAL")
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS bandit_meta (key TEXT PRIMARY KEY, value TEXT)"
+            )
 
     def _load(self) -> None:
         with self._conn() as c:
@@ -95,6 +114,41 @@ class Bandit:
             self._alpha[(task, offering)] = a
             self._beta[(task, offering)] = b
             self._ts[(task, offering)] = ts or now
+
+    def _evidence_version(self) -> int:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT value FROM bandit_meta WHERE key='evidence_version'"
+            ).fetchone()
+        try:
+            return int(row[0]) if row else 1
+        except (TypeError, ValueError):
+            return 1
+
+    def _migrate_evidence(self) -> None:
+        """Slash the confidence of pre-v2 evidence, once.
+
+        Old counts learned under different semantics (delivery counted
+        as quality, escalations punished the rescuer). They are not
+        deleted — the direction is still informative — but quartered,
+        so fresh observations outshout them within days, not months.
+        """
+        if not self._db_path or self._evidence_version() >= EVIDENCE_VERSION:
+            return
+        now = time.time()
+        with self._lock:
+            for key in list(self._alpha):
+                a, b = self._decayed(key, now)
+                self._alpha[key] = 1.0 + (a - 1.0) * STALE_EVIDENCE_KEEP
+                self._beta[key] = 1.0 + (b - 1.0) * STALE_EVIDENCE_KEEP
+                self._persist(*key)
+            count = len(self._alpha)
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO bandit_meta VALUES (?,?)",
+                ("evidence_version", str(EVIDENCE_VERSION)),
+            )
+        log.info("bandit: quartered %d stale evidence pair(s) to v%d", count, EVIDENCE_VERSION)
 
     def _persist(self, task: str, offering: str) -> None:
         if not self._db_path:
@@ -153,7 +207,9 @@ class Bandit:
         a, b = self._decayed((task_class, offering_key), time.time())
         return (a - 1.0) + (b - 1.0)
 
-    def update(self, task_class: str, offering_key: str, reward: float) -> None:
+    def update(
+        self, task_class: str, offering_key: str, reward: float, *, weight: float = 1.0
+    ) -> None:
         """reward in [0,1]: 1 = success, 0 = failure.
 
         Only call this for evidence about ANSWER QUALITY — a verifier
@@ -162,12 +218,15 @@ class Bandit:
         whichever provider happened to be rate limited.
         """
         reward = max(0.0, min(1.0, reward))
+        weight = max(0.0, min(1.0, weight))
+        if weight == 0.0:
+            return
         with self._lock:
             key = (task_class, offering_key)
             now = time.time()
             a, b = self._decayed(key, now)
-            a += reward
-            b += 1.0 - reward
+            a += reward * weight
+            b += (1.0 - reward) * weight
             total = a + b
             if total > self.max_evidence:
                 # Bound the confidence: with unbounded counts the

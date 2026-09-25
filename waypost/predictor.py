@@ -81,11 +81,19 @@ class ModelQualityPredictor:
         offering: Offering,
         profile: RequestProfile,
         embedding: list[float] | None = None,
+        *,
+        prior: float | None = None,
+        max_trust: float = 1.0,
     ) -> float:
         """P(pass | this query, this model), blended with the prior."""
-        prior = offering.quality_for(profile.task_class)
+        if prior is None:
+            prior = offering.quality_for(profile.task_class)
         model_w = self.weights.get(offering.key) if self.is_trained else None
-        if not model_w or not embedding:
+        if not model_w or embedding is None or len(embedding) == 0:
+            self.misses += 1
+            return prior
+
+        if model_w.get("embedder_version", "") != profile.embedder_version:
             self.misses += 1
             return prior
 
@@ -103,7 +111,7 @@ class ModelQualityPredictor:
         p = 1.0 / (1.0 + math.exp(-max(-20.0, min(20.0, raw))))
 
         n = float(model_w.get("n", 0))
-        trust = min(1.0, n / self.FULL_TRUST_N)
+        trust = min(max_trust, n / self.FULL_TRUST_N)
         self.hits += 1
         return trust * p + (1.0 - trust) * prior
 

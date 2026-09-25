@@ -31,6 +31,96 @@ def _has_table(conn: sqlite3.Connection, name: str) -> bool:
     )
 
 
+# Feedback kinds that say the delivered answer was wrong, not followed up.
+NEGATIVE_FEEDBACK = ("corrected", "regenerated", "rated_bad")
+
+
+def _percentile(sorted_vals: list[float], pct: float) -> float:
+    if not sorted_vals:
+        return 0.0
+    return sorted_vals[min(len(sorted_vals) - 1, int(len(sorted_vals) * pct))]
+
+
+def routing_quality(db_path: str | Path, window_s: float = 7 * 86_400) -> dict:
+    """Per-request routing outcomes over the attempt log.
+
+    The legacy `attempts` table counts deliveries; this answers the
+    routing questions instead: solved on the first attempt, escalated,
+    corrected by the user, attempts and latency to an answer, quota
+    spent — overall and per policy arm. Shadows and explorations are
+    excluded: they are measurements, not served requests.
+    """
+    since = time.time() - window_s
+    conn = _conn(db_path)
+    empty = {
+        "requests": 0,
+        "first_attempt_pass_rate": 0.0,
+        "escalation_rate": 0.0,
+        "correction_rate": 0.0,
+        "mean_attempts": 0.0,
+        "p50_latency_ms": 0,
+        "p95_latency_ms": 0,
+        "total_tokens": 0,
+        "by_arm": {},
+    }
+    try:
+        if not _has_table(conn, "attempt_log"):
+            return empty
+        finals = conn.execute(
+            "SELECT request_id, attempt_no, outcome, latency_ms, arm, "
+            "COALESCE(input_tokens,0)+COALESCE(output_tokens,0) "
+            "FROM attempt_log WHERE ts > ? AND is_final = 1 AND is_exploration = 0",
+            (since,),
+        ).fetchall()
+        if not finals:
+            return empty
+        per_req = {
+            r[0]: (r[1], r[2])
+            for r in conn.execute(
+                "SELECT request_id, SUM(latency_ms), "
+                "SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)) "
+                "FROM attempt_log WHERE ts > ? AND is_exploration = 0 "
+                "GROUP BY request_id",
+                (since,),
+            ).fetchall()
+        }
+        corrected = {
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT request_id FROM feedback WHERE ts > ? AND kind IN (?,?,?)",
+                (since, *NEGATIVE_FEEDBACK),
+            ).fetchall()
+        } if _has_table(conn, "feedback") else set()
+
+        def summarize(rows: list) -> dict:
+            n = len(rows)
+            first_pass = sum(
+                1 for r in rows if r[2] == "pass" and (r[1] or 1) == 1
+            )
+            escalated = sum(1 for r in rows if (r[1] or 1) > 1)
+            corrected_n = sum(1 for r in rows if r[0] in corrected)
+            costs = sorted(per_req.get(r[0], (r[3] or 0, r[5] or 0)) for r in rows)
+            return {
+                "requests": n,
+                "first_attempt_pass_rate": round(first_pass / n, 3),
+                "escalation_rate": round(escalated / n, 3),
+                "correction_rate": round(corrected_n / n, 3),
+                "mean_attempts": round(sum(r[1] or 1 for r in rows) / n, 2),
+                "p50_latency_ms": int(_percentile([c[0] for c in costs], 0.50)),
+                "p95_latency_ms": int(_percentile([c[0] for c in costs], 0.95)),
+                "total_tokens": int(sum(c[1] for c in costs)),
+            }
+
+        out = summarize(finals)
+        by_arm: dict[str, list] = {}
+        for r in finals:
+            by_arm.setdefault(r[4] or "control", []).append(r)
+        out["by_arm"] = {arm: summarize(rows) for arm, rows in sorted(by_arm.items())}
+        return out
+    finally:
+        conn.close()
+
+
 def generate(db_path: str | Path, window_s: float = 7 * 86_400) -> dict:
     since = time.time() - window_s
     conn = _conn(db_path)
@@ -118,6 +208,7 @@ def generate(db_path: str | Path, window_s: float = 7 * 86_400) -> dict:
     conn.close()
     return {
         "window_s": window_s,
+        "routing": routing_quality(db_path, window_s),
         "overview": {
             "attempts": total[0] or 0,
             "success_rate": round(total[1] or 0, 3),
@@ -163,6 +254,26 @@ def print_report(r: dict) -> None:
             print(
                 f"  {row['task']:<20} n={row['attempts']:>4} "
                 f"ok={row['success_rate']:.0%}"
+            )
+
+    q = r.get("routing") or {}
+    if q.get("requests"):
+        print(
+            f"\nRouting quality ({q['requests']} requests): "
+            f"first-attempt pass {q['first_attempt_pass_rate']:.0%}, "
+            f"escalated {q['escalation_rate']:.0%}, "
+            f"corrected {q['correction_rate']:.0%}, "
+            f"attempts {q['mean_attempts']:.2f}, "
+            f"p50 {q['p50_latency_ms']}ms p95 {q['p95_latency_ms']}ms, "
+            f"tokens {q['total_tokens']}"
+        )
+        for arm, a in (q.get("by_arm") or {}).items():
+            print(
+                f"  [{arm}] n={a['requests']} "
+                f"first-pass {a['first_attempt_pass_rate']:.0%} "
+                f"escalated {a['escalation_rate']:.0%} "
+                f"corrected {a['correction_rate']:.0%} "
+                f"p95 {a['p95_latency_ms']}ms"
             )
 
     if r["bandit"]:

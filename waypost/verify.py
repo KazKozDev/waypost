@@ -293,6 +293,28 @@ class Verifier:
         return "ungrounded" if score < self.grounding_threshold else None
 
 
+def quality_signal(
+    req: ChatRequest, body: dict[str, Any], ok: bool, reason: str
+) -> tuple[float | None, float]:
+    """Quality reward and evidence weight, separate from delivery/validity.
+
+    Passing syntax or schema checks is weak evidence about task success.
+    Unchecked prose is unknown; a refusal is not a model quality verdict.
+    """
+    if not ok:
+        return (None, 0.0) if reason == "refusal" else (0.0, 1.0)
+    content = _content(body)
+    checked_format = (
+        req.response_format
+        and req.response_format.get("type") in ("json_object", "json_schema")
+    )
+    checked_tools = req.tools and _tool_calls(body)
+    checked_python = re.search(r"```(?:python|py)\n\s*\S", content, re.IGNORECASE)
+    if checked_format or checked_tools or checked_python:
+        return 1.0, 0.25
+    return None, 0.0
+
+
 def map_outcome(
     ok: bool,
     reason: str = "",
