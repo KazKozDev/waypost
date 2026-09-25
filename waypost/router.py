@@ -560,7 +560,13 @@ class Router:
             # The quality floor is a preference, not a ban: if nobody
             # fits it, a weak candidate is better than a refusal.
             cands = survivors(0.0)
-        cands.sort(key=lambda c: c.score, reverse=True)
+        avoid = set(req.avoid_families or ())
+
+        def order(c: Candidate) -> tuple[bool, float]:
+            # A family that already answered goes last, not away.
+            return (model_family(c.offering.model_id) in avoid, -c.score)
+
+        cands.sort(key=order)
         cloud_cands = _diversify([c for c in cands if not c.offering.is_local])
         local_cands = [c for c in cands if c.offering.is_local]
 
@@ -571,9 +577,7 @@ class Router:
         if req.profile == "privacy_only":
             head = (local_cands + cloud_cands)[:limit]
         else:
-            merged = sorted(
-                cloud_cands + local_cands, key=lambda c: c.score, reverse=True
-            )
+            merged = sorted(cloud_cands + local_cands, key=order)
             head = merged[:limit]
             if local_cands and not any(c.offering.is_local for c in head):
                 head = head[: max(0, limit - 1)] + local_cands[:1]

@@ -21,6 +21,10 @@ class SwarmConfig(StrictModel):
     request_timeout: float = Field(default=1500, gt=0)
     max_seconds: float | None = Field(default=None, gt=0)
     allow_python: bool = False
+    # Collective: how many independent members answer a collective question,
+    # and whether each must come from a model family the others did not.
+    collective_width: int = Field(default=3, ge=1, le=5)
+    diverse_models: bool = True
 
 
 class Task(StrictModel):

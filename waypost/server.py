@@ -1042,7 +1042,11 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
 
     prefix = prefix_hash(req)
     plan = app.state.router.plan(
-        req, profile, quality_floor=decision.quality_floor, prefix=prefix
+        req,
+        profile,
+        limit=settings.max_attempts,
+        quality_floor=decision.quality_floor,
+        prefix=prefix,
     )
     log.debug("plan: %s", [c.offering.key for c in plan])
 
@@ -4090,7 +4094,11 @@ async def chat_completions(req: ChatRequest, request: Request):
         meta.task_class = profile.task_class
         meta.complexity_tier = profile.tier.value
         plan = app.state.router.plan(
-            req, profile, quality_floor=decision.quality_floor, prefix=prefix_hash(req)
+            req,
+            profile,
+            limit=settings.max_attempts,
+            quality_floor=decision.quality_floor,
+            prefix=prefix_hash(req),
         )
 
         # Starlette sends the HTTP status and headers before it starts
@@ -4185,7 +4193,11 @@ async def responses_endpoint(request: Request, payload: dict = Body(...)):
     meta.task_class = profile.task_class
     meta.complexity_tier = profile.tier.value
     plan = app.state.router.plan(
-        req, profile, quality_floor=decision.quality_floor, prefix=prefix_hash(req)
+        req,
+        profile,
+        limit=settings.max_attempts,
+        quality_floor=decision.quality_floor,
+        prefix=prefix_hash(req),
     )
 
     upstream = app.state.executor.stream(req, profile, plan, meta).__aiter__()

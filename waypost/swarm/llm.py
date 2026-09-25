@@ -8,6 +8,7 @@ import time
 import uuid
 import httpx
 
+from ..families import model_family
 from .models import SwarmConfig
 from .store import RunStore
 
@@ -72,13 +73,26 @@ class EmptyAnswer(ValueError):
     pass
 
 
+class Answer(str):
+    """Model text that remembers which model family wrote it — the
+    collective needs that to ask the next member someone else."""
+    family: str | None = None
+
+    def __new__(cls, text: str, family: str | None = None):
+        value = super().__new__(cls, text)
+        value.family = family
+        return value
+
+
 class WaypostLLM:
     def __init__(self, config: SwarmConfig, budget: Budget, store: RunStore,
                  session: str, system: str, client: httpx.Client | None = None,
-                 schema: dict | None = None):
+                 schema: dict | None = None, avoid_families: list[str] | None = None):
         self.config, self.budget, self.store = config, budget, store
         self.session, self.system, self.client = session, system, client
         self.schema = schema
+        self.avoid_families = avoid_families
+        self.last_family: str | None = None
         self.last_response: str | None = None
         self.last_error: Exception | None = None
 
@@ -125,6 +139,8 @@ class WaypostLLM:
             # fields and move to another model, instead of the swarm
             # finding out after the fact.
             payload["output_schema"] = self.schema
+        if self.avoid_families:
+            payload["avoid_families"] = self.avoid_families
         if self.config.privacy == "strict":
             payload["privacy"] = "strict"
         timeout = min(self.config.request_timeout, self.budget.remaining())
@@ -170,6 +186,8 @@ class WaypostLLM:
         content = choice["message"].get("content")
         if not isinstance(content, str) or not content.strip():
             raise EmptyAnswer("Waypost returned no text")
+        model = data.get("router", {}).get("model")
+        self.last_family = model_family(model) if model else None
         self.store.event("llm_response", session=self.session,
                          router=data.get("router", {}), usage=data.get("usage", {}),
                          seconds=round(time.monotonic() - started, 1))
@@ -191,9 +209,11 @@ class SwarmsBackend:
         self.agent_class = Agent
         self.config, self.budget, self.store = config, budget, store
 
-    def ask(self, role: str, system: str, prompt: str, schema: dict | None = None) -> str:
+    def ask(self, role: str, system: str, prompt: str, schema: dict | None = None,
+            avoid_families: list[str] | None = None) -> str:
         llm = WaypostLLM(self.config, self.budget, self.store,
-                         f"{self.store.directory.name}:{role}", system, schema=schema)
+                         f"{self.store.directory.name}:{role}", system, schema=schema,
+                         avoid_families=avoid_families)
         agent = self.agent_class(
             agent_name=role, system_prompt=system, llm=llm,
             model_name="openai/auto", max_loops=1, retry_attempts=1,
@@ -213,7 +233,7 @@ class SwarmsBackend:
             raise llm.last_error
         if llm.last_response is None:
             raise RuntimeError("Swarms did not invoke the Waypost adapter")
-        return llm.last_response
+        return Answer(llm.last_response, llm.last_family)
 
 
 def parse_json(text: str) -> dict:

@@ -209,19 +209,64 @@ class SwarmEngine:
                            "monitor_guidance": self.state.get("monitor_guidance", "")}, ensure_ascii=False)
 
     def _structured(self, role, instruction, context, schema):
+        return self._structured_answer(role, instruction, context, schema)[0]
+
+    def _collective(self, role, instruction, context, schema, width=None):
+        """Ask up to `width` independent members the same question, each
+        from a model family the earlier ones did not use.
+
+        Members are asked in turn: the router is told which families have
+        answered, and puts them last. When it still answers from a family
+        already heard — only one family is alive, say the local tail —
+        more members would only repeat it, so the collective stops at the
+        size it could honestly reach. The first member's failure is the
+        caller's; a later member's failure only narrows the collective.
+        Returns [(value, family)] with at least one entry.
+        """
+        width = width or self.config.collective_width
+        members: list[tuple] = []
+        heard: list[str] = []
+        for i in range(width):
+            name = role if i == 0 else f"{role}#{i + 1}"
+            avoid = heard if self.config.diverse_models else None
+            try:
+                value, family = self._structured_answer(name, instruction, context, schema,
+                                                        avoid_families=avoid or None)
+            except (ReplanRequested, RunInterrupted, BudgetExceeded):
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if not members:
+                    raise
+                self.store.event("collective_narrowed", role=role, size=len(members),
+                                 reason=f"{type(exc).__name__}: {str(exc)[:300]}")
+                break
+            if family is not None and family in heard and self.config.diverse_models:
+                self.store.event("collective_narrowed", role=role, size=len(members),
+                                 reason=f"no other model family available (got {family} again)")
+                break
+            members.append((value, family))
+            if family is not None:
+                heard.append(family)
+        self.store.event("collective", role=role, size=len(members),
+                         families=[f for _, f in members])
+        return members
+
+    def _structured_answer(self, role, instruction, context, schema, avoid_families=None):
         prompt = context
         system = RULES + instruction + "\nSCHEMA:\n" + json.dumps(schema.model_json_schema())
         attempt = 0
         while True:
             if self.store.control().get("messages"):
                 raise ReplanRequested("User correction pending")
-            raw = self.backend.ask(role, system, prompt, schema=schema.model_json_schema())
+            raw = (self.backend.ask(role, system, prompt, schema=schema.model_json_schema(),
+                                    avoid_families=avoid_families) if avoid_families else
+                   self.backend.ask(role, system, prompt, schema=schema.model_json_schema()))
             try:
                 value = schema.model_validate(parse_json(raw))
                 plan = value if isinstance(value, Plan) else getattr(value, "repair", None)
                 if plan and self.config.max_tasks is not None and len(plan.tasks) > self.config.max_tasks:
                     raise ValueError("Too many tasks for configured max_tasks")
-                return value
+                return value, getattr(raw, "family", None)
             except (ValueError, ValidationError) as exc:
                 attempt += 1
                 self.store.event("invalid_output", role=role, attempt=attempt,
@@ -230,7 +275,7 @@ class SwarmEngine:
                     if role == "progress-monitor":
                         return ProgressDecision(action="needs_input",
                             reason="Progress agent could not produce a valid assessment",
-                            guidance="Inspect the journal and correct the task or model.")
+                            guidance="Inspect the journal and correct the task or model."), None
                     # A repeated failure against the same workspace is evidence of
                     # stagnation, even if the model varies its invalid JSON.
                     key = f"{role}:{schema.__name__}"
