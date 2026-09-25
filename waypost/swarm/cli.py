@@ -13,6 +13,13 @@ from .models import SwarmConfig
 from .store import RunStore
 
 
+def config_from_args(args) -> SwarmConfig:
+    """Flags override defaults; a config field without a flag (the
+    collective settings) keeps its default instead of crashing the run."""
+    return SwarmConfig(**{field: getattr(args, field) for field in SwarmConfig.model_fields
+                          if hasattr(args, field)})
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Autonomous Swarms agents through Waypost")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -58,7 +65,7 @@ def main(argv=None):
             for source in args.input:
                 if not source.is_file():
                     raise ValueError(f"Not an input file: {source}")
-            config = SwarmConfig(**{field: getattr(args, field) for field in SwarmConfig.model_fields})
+            config = config_from_args(args)
             engine = SwarmEngine(directory, config)
             inputs = engine.store.workspace / "inputs"
             inputs.mkdir(exist_ok=True)

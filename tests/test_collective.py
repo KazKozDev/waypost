@@ -578,3 +578,22 @@ def test_local_model_is_the_tail_not_the_lead(tmp_path):
     assert ladder(local_last=True) == ["gemma/gemma-27b", "local/qwen3.8:27b"]
     router = Router(Registry([local]), ledger, CircuitBreaker(), stochastic=False, local_last=True)
     assert [c.offering.key for c in router.plan(req, classify_l0(req))] == ["local/qwen3.8:27b"]
+
+
+def test_cli_run_starts_with_collective_defaults(tmp_path, monkeypatch):
+    """Every run the app starts goes through this command line. A config
+    field without a flag used to crash it before the first call."""
+    from waypost.swarm import cli
+
+    seen = {}
+
+    def fake_run(self, task=None, **kw):
+        seen["config"] = self.config
+        return {"status": "completed"}
+
+    monkeypatch.setattr(cli.SwarmEngine, "run", fake_run)
+    code = cli.main(["run", "--task", "snake", "--run-dir", str(tmp_path / "run"),
+                     "--concurrency", "3"])
+    assert code == 0
+    assert seen["config"].concurrency == 3
+    assert seen["config"].collective_width == 3 and seen["config"].review_panel
