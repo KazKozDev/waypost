@@ -6,6 +6,14 @@ from waypost.swarm.service import SwarmService
 from waypost.swarm.store import RunStore
 
 
+@pytest.fixture(autouse=True)
+def swarms_installed(monkeypatch):
+    # The plain test job runs without the optional swarm extra; these tests
+    # never start the real runner.
+    import importlib.util
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *args: object())
+
+
 def test_ui_run_control_and_event_cursor(tmp_path, monkeypatch):
     service = SwarmService(tmp_path, "http://127.0.0.1:8081/v1")
     launched = []
@@ -60,7 +68,6 @@ def test_correction_does_not_restart_interrupted_run_until_resume(tmp_path, monk
 
 
 def test_resume_launch_passes_current_router(tmp_path, monkeypatch):
-    import importlib.util
     import subprocess
     service = SwarmService(tmp_path, "http://127.0.0.1:8080/v1")
     directory = tmp_path / uuid.uuid4().hex
@@ -70,7 +77,6 @@ def test_resume_launch_passes_current_router(tmp_path, monkeypatch):
     class Fake:
         pid = 424242
 
-    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
     monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: commands.append(command) or Fake())
     service._launch(directory, resume=True)
     command = commands[0]
