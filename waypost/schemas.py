@@ -60,6 +60,11 @@ class ChatRequest(BaseModel):
     # A retry with the same key must not run twice: a client whose
     # network dropped must not have to know whether the request arrived.
     idempotency_key: str | None = None
+    # Router extension: the JSON Schema the caller will validate against.
+    # Sent upstream only as json_object (not every provider takes
+    # json_schema), but the verifier checks it, so a well-formed answer
+    # with the wrong fields escalates to another model instead of passing.
+    output_schema: dict[str, Any] | None = None
 
     def provider_payload(self, model_id: str) -> dict[str, Any]:
         """Provider request body: router extensions stripped out."""
@@ -72,6 +77,7 @@ class ChatRequest(BaseModel):
             "stakes",
             "thinking_mode",
             "idempotency_key",
+            "output_schema",
             "model",
             "stream",
             "max_completion_tokens",

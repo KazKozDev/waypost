@@ -215,7 +215,7 @@ class SwarmEngine:
         while True:
             if self.store.control().get("messages"):
                 raise ReplanRequested("User correction pending")
-            raw = self.backend.ask(role, system, prompt)
+            raw = self.backend.ask(role, system, prompt, schema=schema.model_json_schema())
             try:
                 value = schema.model_validate(parse_json(raw))
                 plan = value if isinstance(value, Plan) else getattr(value, "repair", None)

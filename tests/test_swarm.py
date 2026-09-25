@@ -31,7 +31,7 @@ class Scripted:
         self.budget = budget
         return self
 
-    def ask(self, role, system, prompt):
+    def ask(self, role, system, prompt, schema=None):
         self.budget.reserve()
         with self.lock:
             self.prompts.append((role, prompt))
@@ -104,12 +104,12 @@ def test_parallel_dependencies(tmp_path):
     barrier = threading.Barrier(2)
     backend = script(**{"supervisor": [plan(tasks)], "r1:b": [final("B")], "r1:c": [final("C")]})
     original = backend.ask
-    def ask(role, system, prompt):
+    def ask(role, system, prompt, schema=None):
         if role in {"r1:a", "r1:b"}:
             barrier.wait(timeout=5)
         if role == "r1:c":
             assert '"a": "done"' in prompt and '"b": "B"' in prompt
-        return original(role, system, prompt)
+        return original(role, system, prompt, schema)
     backend.ask = ask
     assert SwarmEngine(tmp_path, backend_factory=backend.factory).run("Task")["status"] == "completed"
 
@@ -123,11 +123,11 @@ def test_downstream_agent_receives_dependency_file_path(tmp_path):
         {"kind": "tool", "tool": "write_file", "arguments": {"path": "CHECKLIST.md", "content": "five checks"}},
         final("written")], "r1:check": [final("checked")]})
     original = backend.ask
-    def ask(role, system, prompt):
+    def ask(role, system, prompt, schema=None):
         if role == "r1:check":
             assert "artifacts/r1/write/CHECKLIST.md" in prompt
             assert "Do not recreate a file just to inspect it" in system
-        return original(role, system, prompt)
+        return original(role, system, prompt, schema)
     backend.ask = ask
     assert SwarmEngine(tmp_path, backend_factory=backend.factory).run("Task")["status"] == "completed"
 

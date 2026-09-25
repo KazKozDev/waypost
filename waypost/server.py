@@ -1168,6 +1168,31 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
                     resp = await app.state.executor.execute(req, profile, plan2, meta)
                     ok, _ = app.state.verifier.verify(req, profile, resp.model_dump())
 
+            # Step 3b: another model at this tier. Resampling the one that just failed
+            # rarely fixes a format it does not follow; the rest of the
+            # plan — the local tail included — gets its turn, and only an
+            # answer that passes the same check is taken.
+            if not ok and len(plan) > 1:
+                tried = {f"{meta.provider}/{meta.model}"}
+                for cand in plan[: settings.max_attempts]:
+                    if cand.offering.key in tried:
+                        continue
+                    tried.add(cand.offering.key)
+                    try:
+                        alt = await app.state.executor.execute(req, profile, [cand], meta)
+                    except RouterError:
+                        continue
+                    alt_ok, alt_reason = app.state.verifier.verify(
+                        req, profile, alt.model_dump()
+                    )
+                    if alt_ok:
+                        log.info("ESCALATE switched model → %s", cand.offering.key)
+                        resp, ok = alt, True
+                        break
+                    log.info(
+                        "ESCALATE %s also failed: %s", cand.offering.key, alt_reason
+                    )
+
             # Step 4: Fan-out ensemble across diverse families if still failing
             if not ok and settings.enable_ensemble and len(plan) > 1:
                 log.info(

@@ -74,9 +74,11 @@ class EmptyAnswer(ValueError):
 
 class WaypostLLM:
     def __init__(self, config: SwarmConfig, budget: Budget, store: RunStore,
-                 session: str, system: str, client: httpx.Client | None = None):
+                 session: str, system: str, client: httpx.Client | None = None,
+                 schema: dict | None = None):
         self.config, self.budget, self.store = config, budget, store
         self.session, self.system, self.client = session, system, client
+        self.schema = schema
         self.last_response: str | None = None
         self.last_error: Exception | None = None
 
@@ -118,6 +120,11 @@ class WaypostLLM:
             "latency_class": "batch", "no_cache": True,
             "idempotency_key": str(uuid.uuid4()),
         }
+        if self.schema is not None:
+            # Lets Waypost's verifier reject valid JSON with the wrong
+            # fields and move to another model, instead of the swarm
+            # finding out after the fact.
+            payload["output_schema"] = self.schema
         if self.config.privacy == "strict":
             payload["privacy"] = "strict"
         timeout = min(self.config.request_timeout, self.budget.remaining())
@@ -184,9 +191,9 @@ class SwarmsBackend:
         self.agent_class = Agent
         self.config, self.budget, self.store = config, budget, store
 
-    def ask(self, role: str, system: str, prompt: str) -> str:
+    def ask(self, role: str, system: str, prompt: str, schema: dict | None = None) -> str:
         llm = WaypostLLM(self.config, self.budget, self.store,
-                         f"{self.store.directory.name}:{role}", system)
+                         f"{self.store.directory.name}:{role}", system, schema=schema)
         agent = self.agent_class(
             agent_name=role, system_prompt=system, llm=llm,
             model_name="openai/auto", max_loops=1, retry_attempts=1,

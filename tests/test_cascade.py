@@ -219,3 +219,35 @@ def test_http_cascade_records_each_model_and_accepts_negative_feedback(monkeypat
         rows = {r["offering"]: r for r in srv.app.state.telemetry.training_rows()}
         assert rows["good/big"]["reward"] == 0.
         assert rows["good/big"]["weight"] == 1.
+
+
+def test_wrong_fields_switch_to_a_model_that_follows_the_schema(monkeypatch):
+    """Valid JSON with the wrong fields is still a failed answer when the
+    caller sent output_schema: the router moves on to another model by
+    itself instead of handing the bad answer back."""
+    for option in ("ENSEMBLE", "SHADOW", "HEDGING", "SEMANTIC_CACHE", "L1_CLASSIFIER"):
+        monkeypatch.setenv(f"ROUTER_ENABLE_{option}", "false")
+    monkeypatch.setenv("ROUTER_STOCHASTIC_ROUTING", "false")
+
+    def handler(request):
+        content = '{"answer": "42"}' if request.url.host == "c" else '{"n": 42}'
+        return httpx.Response(200, json={
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {
+                "role": "assistant", "content": content,
+            }}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        })
+
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}},
+              "required": ["answer"], "additionalProperties": False}
+    with _make_client(monkeypatch, handler) as client:
+        response = client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "extract the number 42"}],
+            "response_format": {"type": "json_object"},
+            "output_schema": schema,
+        })
+        assert response.status_code == 200
+        result = response.json()
+        assert result["router"]["escalated"] is True
+        assert result["router"]["provider"] == "local"
+        assert result["choices"][0]["message"]["content"] == '{"answer": "42"}'

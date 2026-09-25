@@ -88,15 +88,30 @@ _TYPES = {
 }
 
 
-def validate_schema(value: Any, schema: dict[str, Any]) -> str | None:
+def validate_schema(
+    value: Any, schema: dict[str, Any], root: dict[str, Any] | None = None
+) -> str | None:
     """A mini JSON Schema validator: type, required, properties, enum,
-    items.
+    items, $ref (to #/$defs), anyOf, additionalProperties: false.
 
     A full jsonschema is not needed here: the hot path checks a model
     answer, not user input, and only coarse violations matter. Returns
-    the first error description, or None.
+    the first error description, or None. The last three are what a
+    pydantic schema (nested models, Optional, extra="forbid") uses.
     """
+    root = schema if root is None else root
+    if isinstance(ref := schema.get("$ref"), str) and ref.startswith("#/"):
+        target: Any = root
+        for part in ref[2:].split("/"):
+            target = target.get(part, {}) if isinstance(target, dict) else {}
+        schema = {**target, **{k: v for k, v in schema.items() if k != "$ref"}}
+    if isinstance(options := schema.get("anyOf"), list) and options:
+        errors = [validate_schema(value, opt, root) for opt in options]
+        if all(errors):
+            return errors[0]
     expected = schema.get("type")
+    if expected == "null" and value is not None:
+        return f"expected null, got {type(value).__name__}"
     if expected in _TYPES:
         if expected == "number" and isinstance(value, bool):
             return "boolean instead of number"
@@ -108,12 +123,16 @@ def validate_schema(value: Any, schema: dict[str, Any]) -> str | None:
         for name in schema.get("required", []):
             if name not in value:
                 return f"missing required field {name!r}"
-        for name, sub in (schema.get("properties") or {}).items():
-            if name in value and (err := validate_schema(value[name], sub)):
+        props = schema.get("properties") or {}
+        for name, sub in props.items():
+            if name in value and (err := validate_schema(value[name], sub, root)):
                 return f"{name}: {err}"
+        if schema.get("additionalProperties") is False:
+            if extra := sorted(set(value) - set(props)):
+                return f"unexpected fields {extra}"
     if isinstance(value, list) and (items := schema.get("items")):
         for i, item in enumerate(value):
-            if err := validate_schema(item, items):
+            if err := validate_schema(item, items, root):
                 return f"[{i}]: {err}"
     return None
 
@@ -242,7 +261,7 @@ class Verifier:
             parsed = json.loads(content)
         except (json.JSONDecodeError, TypeError):
             return "invalid_json"
-        if (schema := _schema_of(rf)) is not None:
+        if (schema := _schema_of(rf) or req.output_schema) is not None:
             if validate_schema(parsed, schema):
                 return "schema_violation"
         return None
