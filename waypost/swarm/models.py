@@ -27,6 +27,7 @@ class SwarmConfig(StrictModel):
     diverse_models: bool = True
     review_panel: bool = True
     proposals: bool = True
+    board: bool = True
 
 
 class Task(StrictModel):

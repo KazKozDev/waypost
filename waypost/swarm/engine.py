@@ -4,6 +4,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -28,6 +29,12 @@ Return ONLY a JSON object matching the supplied schema, without markdown fences.
 AUTONOMOUS_REPLANS = 4
 AUTONOMOUS_FAILED_REVIEWS = 6
 
+# The shared board: what every agent sees of what the others learned.
+BOARD_KINDS = ("fact", "decision", "assumption", "dead_end")
+BOARD_TEXT_LIMIT = 500
+BOARD_FACTS_SHOWN = 20
+BOARD_OTHERS_SHOWN = 40
+
 
 class ReplanRequested(RuntimeError):
     pass
@@ -43,6 +50,7 @@ class SwarmEngine:
         self.store = RunStore(Path(directory))
         self.config = config or SwarmConfig()
         self.backend_factory = backend_factory
+        self._board_lock = threading.Lock()
 
     def run(self, task: str | None = None, *, resume: bool = False,
             acknowledge_interrupted_tools: bool = False, base_url: str | None = None) -> dict:
@@ -86,6 +94,7 @@ class SwarmEngine:
                           "status": "running", "phase": "plan", "round": 1, "calls": 0,
                           "elapsed_seconds": 0, "records": {}, "reviews": [], "draft": "",
                           "messages": [], "monitor": [], "monitor_guidance": ""}
+        self.state.setdefault("board", [])
         self.budget = Budget(self.config, self.state, self.store)
         self.state["status"] = "running"
         self.state.pop("error", None)
@@ -105,6 +114,8 @@ class SwarmEngine:
                         if self.state["replans_without_pass"] > AUTONOMOUS_REPLANS:
                             self._finish_best_effort(f"{AUTONOMOUS_REPLANS} different approaches did not pass review")
                         else:
+                            self._post("dead_end", f"Round {self.state['round']} approach abandoned: {exc}",
+                                       "progress-monitor")
                             self.state["round"] += 1
                             self.state["phase"] = "plan"
                             self.state["monitor_guidance"] = str(exc)
@@ -121,6 +132,8 @@ class SwarmEngine:
         except Exception as exc:
             self.state.update(status="failed", error=f"{type(exc).__name__}: {exc}")
         finally:
+            if self.state["status"] == "completed" and self.config.board:
+                self._append_assumptions()
             self.budget.checkpoint()
             self.store.event("run_stopped", status=self.state["status"], calls=self.state["calls"],
                              error=self.state.get("error"))
@@ -157,6 +170,8 @@ class SwarmEngine:
             width = self.config.collective_width if self.config.proposals else 1
             members = self._collective("supervisor", instruction, context, Plan, width=width)
             plan = self._judge_plans(context, members)
+            self._post("decision", f"Round {self.state['round']} plan: " + "; ".join(
+                f"{t.id} ({t.role})" for t in plan.tasks), "supervisor")
             self.state["acceptance"] = plan.acceptance
             self._set_plan(plan)
         elif phase == "execute":
@@ -186,6 +201,8 @@ class SwarmEngine:
                     raise ReplanRequested(decision.reason + ". " + decision.guidance)
                 self.state["status"] = "completed"
                 return
+            for finding in review.findings[:5]:
+                self._post("fact", f"Review round {self.state['round']} failed: {finding}", "review-panel")
             self.state["failed_reviews"] = self.state.get("failed_reviews", 0) + 1
             if self.state["failed_reviews"] >= AUTONOMOUS_FAILED_REVIEWS:
                 self._finish_best_effort(f"{AUTONOMOUS_FAILED_REVIEWS} repairs in a row did not pass review")
@@ -326,9 +343,43 @@ class SwarmEngine:
         self.state["status"] = "completed"
         self.store.event("autonomous_finish", reason=reason, findings=findings[:12])
 
+    def _post(self, kind: str, text: str, author: str) -> int | None:
+        """Write to the shared board. Bounded text; a no-op with board=False."""
+        if not self.config.board or kind not in BOARD_KINDS or not str(text).strip():
+            return None
+        with self._board_lock:
+            board = self.state.setdefault("board", [])
+            entry = {"id": len(board) + 1, "kind": kind, "text": str(text)[:BOARD_TEXT_LIMIT],
+                     "author": author, "round": self.state.get("round", 1)}
+            board.append(entry)
+        self.store.event("board_post", **{k: v for k, v in entry.items() if k != "kind"}, entry_kind=kind)
+        return entry["id"]
+
+    def _board_view(self) -> list[dict]:
+        """What goes into every prompt: all decisions, assumptions and dead
+        ends (the swarm must not repeat or contradict them), plus the
+        latest facts. Bounded so the board cannot crowd out the task."""
+        if not self.config.board:
+            return []
+        with self._board_lock:
+            board = list(self.state.get("board", []))
+        facts = [e for e in board if e["kind"] == "fact"][-BOARD_FACTS_SHOWN:]
+        others = [e for e in board if e["kind"] != "fact"][-BOARD_OTHERS_SHOWN:]
+        shown = sorted(facts + others, key=lambda e: e["id"])
+        return [{"kind": e["kind"], "text": e["text"], "author": e["author"]} for e in shown]
+
+    def _append_assumptions(self):
+        if self.state.get("assumptions_appended"):
+            return
+        assumptions = [e["text"] for e in self.state.get("board", []) if e["kind"] == "assumption"]
+        if assumptions and self.state.get("draft"):
+            self.state["draft"] += "\n\n---\nДопущения роя:\n" + "\n".join("- " + a for a in assumptions[:12])
+            self.state["assumptions_appended"] = True
+
     def _task_context(self):
         return json.dumps({"task": self.state["task"], "user_messages": self.state.get("messages", []),
-                           "monitor_guidance": self.state.get("monitor_guidance", "")}, ensure_ascii=False)
+                           "monitor_guidance": self.state.get("monitor_guidance", ""),
+                           "board": self._board_view()}, ensure_ascii=False)
 
     def _structured(self, role, instruction, context, schema):
         return self._structured_answer(role, instruction, context, schema)[0]
@@ -431,7 +482,8 @@ class SwarmEngine:
                 "results": {k: v[:8000] for k, v in results.items()},
                 "artifacts": {k: self._artifacts_for(k) for k in results},
                 "user_messages": self.state.get("messages", []),
-                "monitor_guidance": self.state.get("monitor_guidance", "")}
+                "monitor_guidance": self.state.get("monitor_guidance", ""),
+                "board": self._board_view()}
         if include_draft:
             data["draft"] = self.state["draft"]
         return json.dumps(data, ensure_ascii=False)
@@ -463,7 +515,8 @@ class SwarmEngine:
                     "user_messages": self.state.get("messages", [])[-4:],
                     "round": self.state["round"], "phase": self.state["phase"],
                     "recent_work": recent, "recent_reviews": self.state["reviews"][-2:],
-                    "artifact_fingerprint": self._artifact_fingerprint()}
+                    "artifact_fingerprint": self._artifact_fingerprint(),
+                    "board": self._board_view()}
         decision = self._structured("progress-monitor",
             "You are the independent progress agent. Judge whether the swarm is moving toward the user's goal. "
             "Compare actual tool observations, artifacts, and review findings. Choose continue when progress is real, "
@@ -490,10 +543,13 @@ class SwarmEngine:
         if decision.action == "needs_input":
             # Autonomous by design: an ambiguity is resolved by assumption,
             # not by stopping the run to ask.
+            self._post("assumption", f"Ambiguity resolved by the swarm, not the user: {decision.reason}",
+                       "progress-monitor")
             raise ReplanRequested(decision.reason + ". Resolve it yourself: pick the most reasonable "
                                   "interpretation, state it as an assumption, and proceed. " + decision.guidance)
         if decision.action == "redirect":
             self.state["monitor_guidance"] = decision.guidance
+            self._post("decision", "Monitor redirect: " + (decision.guidance or decision.reason), "progress-monitor")
         return decision
 
     def _execute_graph(self):
@@ -510,7 +566,8 @@ class SwarmEngine:
                     context = {"task": self.state["task"], "acceptance": self.state["acceptance"],
                                "dependencies": {dep: self.state["records"][prefix + dep]["answer"] for dep in task.depends_on},
                                "dependency_artifacts": {dep: self._artifacts_for(prefix + dep) for dep in task.depends_on},
-                               "previous_draft": self.state.get("draft", "")}
+                               "previous_draft": self.state.get("draft", ""),
+                               "board": self._board_view()}
                     futures[pool.submit(self._worker, task.role, task.instruction,
                                         json.dumps(context, ensure_ascii=False), prefix + task.id)] = task.id
                 errors = []
@@ -534,8 +591,14 @@ class SwarmEngine:
         system_instruction += ("\nTo inspect a dependency artifact, call read_file with its exact "
                                "workspace-relative path from dependency_artifacts. "
                                "Do not recreate a file just to inspect it.")
+        if self.config.board:
+            system_instruction += ("\nShared board: the context's `board` is what the whole swarm has learned. "
+                                   "Do not repeat a dead_end or contradict a decision. To share with every agent, "
+                                   "call tool board_post with {\"kind\": fact|decision|assumption|dead_end, "
+                                   "\"text\": \"...\"} — a fact you verified, a choice you made, an assumption, "
+                                   "or an approach that failed.")
         if read_only:
-            system_instruction += "\nOnly read_file and list_files are allowed."
+            system_instruction += "\nOnly read_file, list_files and board_post are allowed."
         while self.config.max_steps is None or record["steps"] < self.config.max_steps:
             self.budget.check()
             history = json.dumps(record["history"][-8:], ensure_ascii=False)
@@ -555,9 +618,18 @@ class SwarmEngine:
             self.store.event("tool_started", task=key, tool=action.tool, arguments=action.arguments)
             try:
                 self.budget.check()
-                if read_only and action.tool not in {"read_file", "list_files"}:
-                    raise ValueError("Reviewer only has read access")
-                observation = tools.execute(action.tool, action.arguments, timeout=self.budget.remaining())
+                if action.tool == "board_post" and self.config.board:
+                    kind = str(action.arguments.get("kind", ""))
+                    if kind not in BOARD_KINDS:
+                        raise ValueError(f"board_post kind must be one of {BOARD_KINDS}")
+                    entry = self._post(kind, str(action.arguments.get("text", "")), key)
+                    if entry is None:
+                        raise ValueError("board_post requires nonempty text")
+                    observation = json.dumps({"posted": entry})
+                else:
+                    if read_only and action.tool not in {"read_file", "list_files"}:
+                        raise ValueError("Reviewer only has read access")
+                    observation = tools.execute(action.tool, action.arguments, timeout=self.budget.remaining())
             except BudgetExceeded:
                 raise
             except Exception as exc:
