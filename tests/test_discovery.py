@@ -12,7 +12,7 @@ def test_manifest_loads_all_providers():
     reg = Registry.from_manifest("config/providers.yaml")
     providers = {o.provider for o in reg.all()}
     assert {
-        "mlx",
+        "local",
         "openrouter",
         "groq",
         "nvidia",

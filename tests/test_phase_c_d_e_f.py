@@ -59,7 +59,7 @@ def test_phase_c_launchd_plist_structure():
 
 
 def test_phase_e_local_pool_narrowing():
-    """Verify config/providers.yaml has exactly 1 local provider (mlx) and 1 local Qwen model."""
+    """Verify config/providers.yaml has exactly 1 local provider (Ollama) and 1 local Qwen model."""
     with open("config/providers.yaml", "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
@@ -67,7 +67,7 @@ def test_phase_e_local_pool_narrowing():
     assert len(local_providers) == 1
 
     provider_names = {p["name"] for p in local_providers}
-    assert provider_names == {"mlx"}
+    assert provider_names == {"local"}
 
     # Total local models count across local providers
     local_models = [m for p in local_providers for m in p.get("models", [])]

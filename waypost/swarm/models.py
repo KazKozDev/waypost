@@ -18,7 +18,7 @@ class SwarmConfig(StrictModel):
     max_steps: int | None = Field(default=None, ge=1)
     max_calls: int | None = Field(default=None, ge=1)
     max_tokens: int = Field(default=4096, ge=256, le=32768)
-    request_timeout: float = Field(default=310, gt=0)
+    request_timeout: float = Field(default=1500, gt=0)
     max_seconds: float | None = Field(default=None, gt=0)
     allow_python: bool = False
 

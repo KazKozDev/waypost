@@ -402,6 +402,7 @@ __NAV_HEADER__
   <button id="pause-button" class="swarm-button" disabled>Пауза</button>
   <button id="resume-button" class="swarm-button" disabled>Продолжить</button>
   <button id="interrupt-button" class="swarm-button danger" disabled>Прервать</button>
+  <button id="clear-button" class="swarm-button" title="Остановить задачу и начать с чистого листа (Cmd+K)">Clear</button>
 </div>
 <main id="feed" class="swarm-feed"><div id="feed-inner" class="feed-inner">
   <div id="empty" class="swarm-empty"><div class="swarm-mark"><img src="__GLYPH_URI__" alt=""></div><h1>Что поручить рою?</h1>
@@ -444,6 +445,7 @@ function eventView(e){
   if(kind==='llm_response')return addLog(e.time,'Ответ · '+agentOf(e),(e.router?.provider||'')+' / '+(e.router?.model||'')+secs(e)+ladder(e));
   if(kind==='llm_error')return addLog(e.time,'Ошибка · '+agentOf(e),(e.status?e.status+' · ':'')+(e.error||'')+secs(e)+ladder(e));
   if(kind==='invalid_output')return addLog(e.time,'Исправление ответа',e.error||'Неверный формат');
+  if(kind==='autonomous_finish')return addLog(e.time,'Завершено автономно',e.reason||'');
   if(kind==='run_stopped')return addLog(e.time,'Статус',(e.status||'')+(e.error?' · '+e.error:''));
   if(kind==='paused'||kind==='resumed'||kind==='replan'||kind==='interrupt_requested'||kind==='pause_requested'||kind==='resume_requested')return addLog(e.time,'Управление',kind+(e.reason?' · '+e.reason:''));
 }
@@ -473,7 +475,13 @@ async function send(){const text=$('message').value.trim();if(!text||busy)return
 async function control(action){if(!runId)return;try{await api('/v1/swarm/runs/'+runId+'/'+action,{method:'POST'});await poll()}catch(err){showError(err.message)}}
 $('send-button').onclick=send;$('message').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});
 $('pause-button').onclick=()=>control('pause');$('resume-button').onclick=()=>control('resume');$('interrupt-button').onclick=()=>control('interrupt');
-$('new-button').onclick=()=>{runId='';newRunMode=true;localStorage.removeItem('waypost-swarm-run');$('run-select').value='';resetFeed();$('run-status').innerHTML='<span class="status-dot"></span><span>Готов к задаче</span>';currentStatus='';for(const id of ['pause-button','resume-button','interrupt-button'])$(id).disabled=true;$('message').focus()};
+function startNew(){runId='';newRunMode=true;localStorage.removeItem('waypost-swarm-run');$('run-select').value='';resetFeed();$('run-status').innerHTML='<span class="status-dot"></span><span>Готов к задаче</span>';currentStatus='';for(const id of ['pause-button','resume-button','interrupt-button'])$(id).disabled=true;$('message').focus()}
+$('new-button').onclick=startNew;
+// Clear, like the chat's: the running task is stopped, the screen starts
+// over. The run itself stays in the list with its artifacts.
+async function clearRun(){if(runId&&currentStatus==='running'){try{await api('/v1/swarm/runs/'+runId+'/interrupt',{method:'POST'})}catch(err){}}$('message').value='';showError('');startNew()}
+$('clear-button').onclick=clearRun;
+document.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();clearRun()}});
 $('run-select').onchange=e=>{runId=e.target.value;newRunMode=!runId;if(runId)localStorage.setItem('waypost-swarm-run',runId);else localStorage.removeItem('waypost-swarm-run');resetFeed();poll()};
 refreshRuns().then(poll).catch(err=>showError(err.message));setInterval(poll,1500);setInterval(()=>refreshRuns().catch(()=>{}),12000);
 </script></body></html>"""

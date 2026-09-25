@@ -30,22 +30,28 @@
 #                  not tuning, but Mac Studio memory protection)
 
 providers:
-  # ------------------------------------------------------------- MLX LM (Primary Local)
-  - name: mlx
-    base_url: http://127.0.0.1:8081/v1    # mlx_lm.server
+  # ------------------------------------------------ Ollama (Primary Local)
+  # The local tail of every ladder: when the cloud refuses, this answers.
+  # Replaced the MLX server on :8081 (scripts/mlx_runner.py), which was
+  # never running here — so the ladder had no local tail and ended in 502.
+  # Pinned to ONE model — Ollama keeps one resident, and a pool of its
+  # models would pay a full reload on every switch (see
+  # local_ollama_allowed). Not named "ollama": that is the cloud provider.
+  - name: local
+    base_url: http://127.0.0.1:11434/v1
     is_local: true
     trains_on_data: false
     free: true
     concurrency: 1
     prompt_cache: auto
     models:
-      - id: mlx-community/Qwen3.6-27B-4bit
+      - id: qwen3.8:27b-mlx
         tier: L
-        ctx_window: 32768
+        ctx_window: 131072
         max_output: 8192
         caps: [tools, json, stream]
         quality_score: 0.82
-        ttft_p50_ms: 450
+        ttft_p50_ms: 800
         weight: 1.0
 
   # ------------------------------------------------------------ OpenRouter

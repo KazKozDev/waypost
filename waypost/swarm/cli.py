@@ -32,7 +32,7 @@ def main(argv=None):
     run.add_argument("--max-tasks", type=int, default=None, help="Optional safety cap; unlimited by default")
     run.add_argument("--max-seconds", type=float, default=None, help="Optional safety cap; unlimited by default")
     run.add_argument("--max-tokens", type=int, default=4096)
-    run.add_argument("--request-timeout", type=float, default=310)
+    run.add_argument("--request-timeout", type=float, default=1500)
     run.add_argument("--allow-python", action="store_true", help="Allow arbitrary Python as your OS user; this is NOT sandboxed")
     resume = commands.add_parser("resume", help="Continue a failed/interrupted run")
     resume.add_argument("run_dir", type=Path)

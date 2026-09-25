@@ -221,6 +221,36 @@ async def test_deadline_leaves_room_for_the_local_fallback(db):
     assert meta.provider == "local"
 
 
+@pytest.mark.asyncio
+async def test_local_tail_runs_even_after_the_deadline(db):
+    """The deadline bounds the cloud descent, not the answer: a cloud that
+    eats the whole budget must not turn a working local model into a 502."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.port != 9:
+            await asyncio.sleep(30.0)
+        await asyncio.sleep(2.0)  # the local model is slower than the budget left
+        return httpx.Response(200, json=ok_body("local"))
+
+    offerings = [cloud(f"p{i}", i + 1) for i in range(3)] + [
+        Offering(
+            provider="local",
+            model_id="q",
+            base_url="http://local:9/v1",
+            is_local=True,
+            trains_on_data=False,
+            caps=CAPS,
+            quality_score=0.4,
+        )
+    ]
+    router, executor, *_ = build(
+        handler, offerings, db, deadlines={"interactive": 1.5}, enable_hedging=False
+    )
+    _, meta = await run(router, executor)
+    assert meta.provider == "local"
+    assert executor.snapshot()["deadline_exceeded"] >= 1
+
+
 # ---------------------------------------------------------------- bandit
 
 

@@ -382,8 +382,10 @@ async def discover_provider(
             mid = m.get("id", "")
             if not mid or not _is_chat_model(mid):
                 continue
-            # For MLX, avoid auto-registering un-loaded HF cache models if manifest already configured MLX
-            if provider.provider == "mlx" and known and mid not in known:
+            # A local engine the manifest pins stays pinned: registering
+            # every model Ollama or the HF cache holds would make the plan
+            # mix them and pay a full reload on each switch.
+            if provider.is_local and known and mid not in known:
                 continue
 
             if is_remote_cloud_ollama:

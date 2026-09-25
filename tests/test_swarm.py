@@ -137,19 +137,17 @@ def test_malformed_plan_repaired(tmp_path):
     assert SwarmEngine(tmp_path, backend_factory=backend.factory).run("Task")["status"] == "completed"
 
 
-def test_repeated_invalid_review_replans_then_requests_input(tmp_path):
+def test_repeated_invalid_review_replans_then_finishes_on_its_own(tmp_path):
     invalid = {"passed": False, "findings": ["repair needed"],
                "repair": plan([{"id": "fix", "role": "fixer", "instruction": "Fix",
                                 "depends_on": ["unknown"]}])}
-    backend = script(**{"supervisor": [plan(), plan()],
-                        "r2:a": [final("retried")], "r2:synthesis": [final("retried")],
-                        "r2:audit": [final("retried")],
-                        "review-verdict": [invalid] * 9})
+    many = {f"r{r}:{k}": [final("retried")] * 3 for r in range(1, 12) for k in ("a", "synthesis", "audit")}
+    backend = script(**many, **{"supervisor": [plan()] * 12, "review-verdict": [invalid] * 60})
     state = SwarmEngine(tmp_path, backend_factory=backend.factory).run("Task")
-    assert state["status"] == "needs_attention"
-    assert state["round"] == 2
-    assert sum(role == "review-verdict" for role, _ in backend.prompts) == 9
-    assert "after replanning" in state["error"]
+    assert state["status"] == "completed"
+    assert "Завершено автономно" in state["draft"]
+    assert any(e == "replan" for e in (json.loads(l)["event"] for l in
+               (tmp_path / "events.jsonl").read_text().splitlines()))
 
 
 def test_review_limit(tmp_path):
@@ -243,12 +241,29 @@ def test_user_correction_replans_completed_run(tmp_path):
     assert any(role == "supervisor" and "Change the result" in prompt for role, prompt in backend.prompts)
 
 
-def test_progress_agent_can_request_user_input(tmp_path):
-    backend = script(**{"progress-monitor": [{"action": "needs_input",
-                        "reason": "Source data is ambiguous", "guidance": "Ask which source to use"}]})
+def test_progress_agent_resolves_ambiguity_itself(tmp_path):
+    """Autonomous: needs_input becomes a replan by assumption, not a stop."""
+    backend = script(**{"supervisor": [plan(), plan()],
+                        "r2:a": [final()], "r2:synthesis": [final("answer")],
+                        "r2:audit": [final("checked")],
+                        "progress-monitor": [{"action": "needs_input",
+                            "reason": "Source data is ambiguous", "guidance": "Ask which source to use"}]
+                            + [{"action": "continue", "reason": "Progressing"}] * 5})
     state = SwarmEngine(tmp_path, backend_factory=backend.factory).run("Task")
-    assert state["status"] == "needs_attention"
+    assert state["status"] == "completed" and state["round"] == 2
     assert state["monitor"][0]["trigger"] == "specialists_finished"
+    assert "assumption" in state["monitor_guidance"]
+
+
+def test_endless_failed_reviews_finish_best_effort(tmp_path):
+    """The loop fuse: a review that never passes ends the run with the best
+    draft and the open findings, instead of repairing forever."""
+    failing = {"passed": False, "findings": ["still missing X"], "repair": plan()}
+    many = {f"r{r}:{k}": [final(f"r{r}")] * 3 for r in range(1, 12) for k in ("a", "synthesis", "audit")}
+    backend = script(**many, **{"supervisor": [plan()] * 12, "review-verdict": [failing] * 40})
+    state = SwarmEngine(tmp_path, backend_factory=backend.factory).run("Task")
+    assert state["status"] == "completed"
+    assert "Завершено автономно" in state["draft"] and "still missing X" in state["draft"]
 
 
 def test_progress_agent_can_reject_reviewers_premature_success(tmp_path):

@@ -22,6 +22,12 @@ Return ONLY a JSON object matching the supplied schema, without markdown fences.
 """
 
 
+# Loop fuse. Past these the swarm stops repairing and delivers what it has,
+# with the open review findings attached — it never waits on the user.
+AUTONOMOUS_REPLANS = 4
+AUTONOMOUS_FAILED_REVIEWS = 6
+
+
 class ReplanRequested(RuntimeError):
     pass
 
@@ -51,6 +57,12 @@ class SwarmEngine:
             if base_url and base_url != saved.base_url:
                 self.store.event("base_url_changed", previous=saved.base_url, current=base_url)
                 saved = saved.model_copy(update={"base_url": base_url})
+                self.state["config"] = saved.model_dump()
+            # A run saved under an older, shorter timeout would still cut the
+            # router off before its local tail answers.
+            floor = SwarmConfig.model_fields["request_timeout"].default
+            if saved.request_timeout < floor:
+                saved = saved.model_copy(update={"request_timeout": floor})
                 self.state["config"] = saved.model_dump()
             self.config = saved
             self.store.update_control(interrupt=False)
@@ -88,10 +100,14 @@ class SwarmEngine:
                     if self.store.control().get("messages"):
                         self.store.event("correction_pending")
                     else:
-                        self.state["round"] += 1
-                        self.state["phase"] = "plan"
-                        self.state["monitor_guidance"] = str(exc)
-                        self.store.event("replan", reason=str(exc), round=self.state["round"])
+                        self.state["replans_without_pass"] = self.state.get("replans_without_pass", 0) + 1
+                        if self.state["replans_without_pass"] > AUTONOMOUS_REPLANS:
+                            self._finish_best_effort(f"{AUTONOMOUS_REPLANS} different approaches did not pass review")
+                        else:
+                            self.state["round"] += 1
+                            self.state["phase"] = "plan"
+                            self.state["monitor_guidance"] = str(exc)
+                            self.store.event("replan", reason=str(exc), round=self.state["round"])
                 if self.state["status"] in {"completed", "needs_attention"}:
                     break
                 self.budget.checkpoint()
@@ -158,10 +174,16 @@ class SwarmEngine:
                 "otherwise repair=null.", self._context(include_draft=True) + "\nAUDIT:\n" + evidence, Review)
             self.state["reviews"].append(review.model_dump())
             if review.passed:
+                self.state["failed_reviews"] = 0
+                self.state["replans_without_pass"] = 0
                 decision = self._monitor("review_passed")
                 if decision.action == "redirect":
                     raise ReplanRequested(decision.reason + ". " + decision.guidance)
                 self.state["status"] = "completed"
+                return
+            self.state["failed_reviews"] = self.state.get("failed_reviews", 0) + 1
+            if self.state["failed_reviews"] >= AUTONOMOUS_FAILED_REVIEWS:
+                self._finish_best_effort(f"{AUTONOMOUS_FAILED_REVIEWS} repairs in a row did not pass review")
                 return
             self._monitor("review_failed")
             if self.config.max_rounds is not None and self.state["round"] >= self.config.max_rounds:
@@ -169,6 +191,18 @@ class SwarmEngine:
                 return
             self.state["round"] += 1
             self._set_plan(review.repair)
+
+    def _finish_best_effort(self, reason: str):
+        """The loop fuse. An autonomous swarm must end without a human: it
+        delivers the best draft it has and says plainly what did not pass,
+        instead of repairing forever or stopping to ask."""
+        findings = (self.state["reviews"][-1]["findings"] if self.state["reviews"] else [])
+        note = "\n\n---\nЗавершено автономно: " + reason + "."
+        if findings:
+            note += "\nНе подтверждено проверкой:\n" + "\n".join("- " + f for f in findings[:12])
+        self.state["draft"] = (self.state.get("draft") or "") + note
+        self.state["status"] = "completed"
+        self.store.event("autonomous_finish", reason=reason, findings=findings[:12])
 
     def _task_context(self):
         return json.dumps({"task": self.state["task"], "user_messages": self.state.get("messages", []),
@@ -204,8 +238,9 @@ class SwarmEngine:
                     previous = self.state.setdefault("invalid_stalls", {}).get(key)
                     if previous and previous["fingerprint"] == fingerprint:
                         if previous["round"] != self.state["round"]:
-                            raise NeedsInput(f"{role} still cannot produce a valid {schema.__name__} "
-                                             "after replanning. Send a correction or choose another model.")
+                            # Still autonomous: a different plan, then the loop fuse.
+                            raise ReplanRequested(f"{role} still cannot produce a valid {schema.__name__} "
+                                                  "after replanning. Simplify the approach.")
                         raise ReplanRequested(f"{role} is repeating invalid {schema.__name__} output "
                                               "without changing any artifact; use a different strategy.")
                     self.state["invalid_stalls"][key] = {"fingerprint": fingerprint,
@@ -265,8 +300,9 @@ class SwarmEngine:
         decision = self._structured("progress-monitor",
             "You are the independent progress agent. Judge whether the swarm is moving toward the user's goal. "
             "Compare actual tool observations, artifacts, and review findings. Choose continue when progress is real, "
-            "redirect with concrete guidance when a worker is confused, replan when the strategy is failing, "
-            "or needs_input when the user must resolve an ambiguity. Repeated identical actions with no new evidence "
+            "redirect with concrete guidance when a worker is confused, or replan when the strategy is failing. "
+            "The swarm is autonomous: never wait for the user — resolve an ambiguity yourself by choosing the most "
+            "reasonable interpretation and stating it as an assumption. Repeated identical actions with no new evidence "
             "are a loop and must not continue. Never declare success from claims alone.",
             json.dumps(evidence, ensure_ascii=False), ProgressDecision)
         if trigger == "repeated_tool_action" and decision.action == "continue":
@@ -276,15 +312,19 @@ class SwarmEngine:
             fingerprint = hashlib.sha256(json.dumps({"artifacts": evidence["artifact_fingerprint"],
                 "findings": self.state["reviews"][-1]["findings"]}, sort_keys=True).encode()).hexdigest()
             if fingerprint == self.state.get("last_failed_review_fingerprint"):
-                decision = ProgressDecision(action="needs_input", reason="Review and artifacts did not change after repair",
-                                            guidance="Ask the user for a correction or missing information.")
+                decision = ProgressDecision(action="replan", reason="Review and artifacts did not change after repair",
+                                            guidance="The last repair made no difference. Reason about why, then take a "
+                                                     "different approach instead of repeating it.")
             self.state["last_failed_review_fingerprint"] = fingerprint
         self.state.setdefault("monitor", []).append({"trigger": trigger, **decision.model_dump()})
         self.store.event("progress_assessment", trigger=trigger, **decision.model_dump())
         if decision.action == "replan":
             raise ReplanRequested(decision.reason + ". " + decision.guidance)
         if decision.action == "needs_input":
-            raise NeedsInput(decision.reason + ". " + decision.guidance)
+            # Autonomous by design: an ambiguity is resolved by assumption,
+            # not by stopping the run to ask.
+            raise ReplanRequested(decision.reason + ". Resolve it yourself: pick the most reasonable "
+                                  "interpretation, state it as an assumption, and proceed. " + decision.guidance)
         if decision.action == "redirect":
             self.state["monitor_guidance"] = decision.guidance
         return decision

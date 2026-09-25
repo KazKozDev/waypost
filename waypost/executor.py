@@ -1042,16 +1042,24 @@ class Executor:
         deadline = time.monotonic() + budget
         meta.deadline_s = round(budget, 1)
 
+        out_of_time = False
         for i, cand in enumerate(candidates):
-            if self._left(deadline) < MIN_SLICE_S:
-                self._counters["deadline_exceeded"] += 1
-                log.warning(
-                    "DEADLINE %.1fs exhausted after %d attempts (path %s)",
-                    budget,
-                    meta.attempts,
-                    ">".join(meta.fallback_path),
-                )
-                break
+            is_local = cand.offering.is_local
+            if not is_local and self._left(deadline) < MIN_SLICE_S:
+                if not out_of_time:
+                    out_of_time = True
+                    self._counters["deadline_exceeded"] += 1
+                    log.warning(
+                        "DEADLINE %.1fs exhausted after %d attempts (path %s); "
+                        "skipping to the local tail",
+                        budget,
+                        meta.attempts,
+                        ">".join(meta.fallback_path),
+                    )
+                # The deadline bounds the cloud descent, not the answer: the
+                # local tail below still runs, or the client gets a 502 that
+                # a model on this machine could have prevented.
+                continue
             meta.attempts += 1
             meta.fallback_path.append(cand.offering.key)
             backup = candidates[i + 1] if i + 1 < len(candidates) else None
@@ -1062,9 +1070,10 @@ class Executor:
                 cand,
                 req,
                 profile,
-                backup,
+                None if is_local else backup,
                 meta,
-                deadline=deadline,
+                # Last resort: no deadline, only the per-call timeout.
+                deadline=None if is_local else deadline,
                 share=1.0 if is_last else ATTEMPT_SHARE,
             )
 
