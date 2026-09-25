@@ -26,6 +26,7 @@ class SwarmConfig(StrictModel):
     collective_width: int = Field(default=3, ge=1, le=5)
     diverse_models: bool = True
     review_panel: bool = True
+    proposals: bool = True
 
 
 class Task(StrictModel):
@@ -107,3 +108,24 @@ class ReviewConsensus(StrictModel):
         if not self.confirmed and self.repair is not None:
             raise ValueError("no confirmed findings means no repair plan")
         return self
+
+
+class Critique(StrictModel):
+    proposal: int = Field(ge=0)
+    strengths: list[str]
+    flaws: list[str]
+
+
+class PlanChoice(StrictModel):
+    """A judge's pick among independent plans: critique each, then choose
+    one or merge their strong parts into a new plan."""
+    critiques: list[Critique]
+    chosen: int = Field(ge=0)
+    merged: Plan | None = None
+
+
+class DraftChoice(StrictModel):
+    """A judge's pick among independent final deliverables."""
+    critiques: list[Critique]
+    chosen: int = Field(ge=0)
+    merged: str | None = None

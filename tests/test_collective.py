@@ -181,6 +181,8 @@ class FamilyScript:
 
     def ask(self, role, system, prompt, schema=None, avoid_families=None):
         self.calls.append(role)
+        self.avoided = getattr(self, "avoided", {})
+        self.avoided[role] = list(avoid_families or [])
         if role == "progress-monitor" and role not in self.script:
             return Answer(json.dumps({"action": "continue", "reason": "ok"}), None)
         if role not in self.script or not self.script[role]:
@@ -241,3 +243,87 @@ def test_panel_off_is_a_single_reviewer(tmp_path):
     assert state["status"] == "completed"
     assert backend.calls.count("review-verdict") == 1
     assert not any(c.startswith("review-verdict#") for c in backend.calls)
+
+
+# ------------------------------------------------ stage 3: proposals, judge
+
+
+def _tasks(tag):
+    return _plan([{"id": tag, "role": tag, "instruction": "Do " + tag, "depends_on": []}])
+
+
+def _choice(chosen, merged=None):
+    return {"critiques": [{"proposal": 0, "strengths": ["s"], "flaws": ["f"]}],
+            "chosen": chosen, "merged": merged}
+
+
+def test_judge_picks_among_independent_plans(tmp_path):
+    state, backend, events = _run(tmp_path, {
+        "supervisor": [_tasks("x")], "supervisor#2": [_tasks("y")], "supervisor#3": [_tasks("z")],
+        "judge-plan": [_choice(1)],
+        "r1:y": [_final()], "review-verdict": [PASS]}, review_panel=False)
+    assert state["status"] == "completed"
+    assert [t["id"] for t in state["plan"]["tasks"]] == ["y"]
+    assert backend.avoided["judge-plan"] == ["llama", "qwen", "gemma"]  # not an author
+    judged = next(e for e in events if e["event"] == "proposals_judged")
+    assert judged["subject"] == "plan" and judged["chosen"] == 1
+
+
+def test_judge_can_merge_plans(tmp_path):
+    state, backend, events = _run(tmp_path, {
+        "supervisor": [_tasks("x")], "supervisor#2": [_tasks("y")],
+        "judge-plan": [_choice(0, merged=_tasks("m"))],
+        "r1:m": [_final()], "review-verdict": [PASS]}, review_panel=False)
+    assert [t["id"] for t in state["plan"]["tasks"]] == ["m"]
+
+
+def test_failed_judge_falls_back_to_the_first_plan(tmp_path):
+    state, backend, events = _run(tmp_path, {
+        "supervisor": [_tasks("x")], "supervisor#2": [_tasks("y")],
+        "r1:x": [_final()], "review-verdict": [PASS]}, review_panel=False)
+    assert state["status"] == "completed"
+    assert [t["id"] for t in state["plan"]["tasks"]] == ["x"]
+    assert any(e["event"] == "judge_failed" for e in events)
+
+
+def test_judge_picks_among_independent_drafts(tmp_path):
+    state, backend, events = _run(tmp_path, {
+        "r1:synthesis": [_final("draft one")], "r1:synthesis#2": [_final("draft two")],
+        "judge-draft": [_choice(1)], "review-verdict": [PASS]}, review_panel=False)
+    assert state["draft"] == "draft two"
+    assert (tmp_path / "result.md").read_text() == "draft two"
+
+
+def test_width_one_has_no_judge(tmp_path):
+    state, backend, events = _run(tmp_path, {"review-verdict": [PASS]}, collective_width=1)
+    assert state["status"] == "completed"
+    assert not any(c.startswith("judge") or "#" in c for c in backend.calls)
+
+
+@pytest.mark.asyncio
+async def test_fanout_returns_only_a_verified_answer():
+    from unittest.mock import AsyncMock, MagicMock
+    from waypost.ensemble import fanout_ensemble
+    from waypost.router import Candidate
+    from waypost.schemas import ChatResponse, RequestProfile, Tier
+
+    def reply(text):
+        return ChatResponse(id="x", model="m", choices=[
+            {"index": 0, "message": {"role": "assistant", "content": text}}])
+
+    executor = MagicMock()
+    executor.execute = AsyncMock(side_effect=[reply("bad"), reply("good")])
+    cands = [Candidate(offering=_offering(m, 0.9), score=1.0, reasons={})
+             for m in ("qwen-7b", "llama-8b")]
+
+    class Verifier:
+        def verify(self, req, profile, body):
+            return body["choices"][0]["message"]["content"] == "good", ""
+
+    req = ChatRequest(messages=[ChatMessage(role="user", content="q")])
+    profile = RequestProfile(task_probs={"chat": 1.0}, tier=Tier.M)
+    res = await fanout_ensemble(executor, req, profile, cands, verifier=Verifier())
+    assert res is not None and res.choices[0]["message"]["content"] == "good"
+
+    executor.execute = AsyncMock(side_effect=[reply("bad"), reply("bad")])
+    assert await fanout_ensemble(executor, req, profile, cands, verifier=Verifier()) is None

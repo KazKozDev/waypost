@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .families import get_model_family
 from .schemas import ChatRequest, ChatResponse, RequestProfile
@@ -90,8 +90,13 @@ async def fanout_ensemble(
     candidates: list[Candidate],
     max_proposers: int = 3,
     fanout_timeout_ms: int = 4000,
+    verifier: Any | None = None,
 ) -> ChatResponse | None:
-    """Dispatches request concurrently to 2-3 distinct model families with mandatory timeout (Spec L.2)."""
+    """Dispatches request concurrently to 2-3 distinct model families with mandatory timeout (Spec L.2).
+
+    With a verifier, only an answer that passes it is returned — the fan-out
+    runs because an answer already failed verification, and handing back the
+    first reply that arrives just swaps one unchecked answer for another."""
     # Select up to max_proposers of distinct model families
     selected: list[Candidate] = []
     seen_families: set[str] = set()
@@ -108,7 +113,10 @@ async def fanout_ensemble(
         return None
 
     if len(selected) == 1:
-        return await executor.execute(req, profile, selected)
+        single = await executor.execute(req, profile, selected)
+        if verifier is not None and not verifier.verify(req, profile, single.model_dump())[0]:
+            return None
+        return single
 
     tasks = [
         asyncio.create_task(executor.execute(req, profile, [cand])) for cand in selected
@@ -129,6 +137,10 @@ async def fanout_ensemble(
     for p in pending:
         p.cancel()
 
+    if verifier is not None:
+        responses = [
+            r for r in responses if verifier.verify(req, profile, r.model_dump())[0]
+        ]
     if not responses:
         return None
 

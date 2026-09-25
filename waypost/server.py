@@ -1211,6 +1211,7 @@ async def run_chat(req: ChatRequest, meta: RouterMeta | None = None) -> dict:
                         plan,
                         max_proposers=3,
                         fanout_timeout_ms=settings.fanout_timeout_ms,
+                        verifier=app.state.verifier,
                     )
                     if resp_fan:
                         resp = resp_fan

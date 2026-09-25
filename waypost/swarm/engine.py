@@ -10,7 +10,8 @@ from typing import Callable
 from pydantic import ValidationError
 
 from .llm import Budget, BudgetExceeded, RunInterrupted, SwarmsBackend, parse_json
-from .models import Action, Plan, ProgressDecision, Review, ReviewConsensus, SwarmConfig
+from .models import (Action, DraftChoice, Plan, PlanChoice, ProgressDecision, Review,
+                     ReviewConsensus, SwarmConfig)
 from .store import RunStore
 from .tools import WorkspaceTools
 
@@ -146,13 +147,16 @@ class SwarmEngine:
         if phase == "plan":
             task_limit = (f"At most {self.config.max_tasks} tasks. " if self.config.max_tasks else
                           "Choose the number of tasks based on the work; avoid redundant roles. ")
-            plan = self._structured("supervisor", "Decompose the task into an acyclic graph of specialists. "
+            instruction = ("Decompose the task into an acyclic graph of specialists. "
                 + task_limit + "Define explicit acceptance criteria. Choose roles based on the task. "
                 "Each specialist can read/write UTF-8 files" +
                 (" and execute Python." if self.config.allow_python else ". Python and web access are unavailable.") +
                 " Inputs are under inputs/ if provided. List files to discover them. "
-                "Use dependencies only where outputs are required. Incorporate user corrections and monitor guidance.",
-                self._context() if self.state.get("acceptance") else self._task_context(), Plan)
+                "Use dependencies only where outputs are required. Incorporate user corrections and monitor guidance.")
+            context = self._context() if self.state.get("acceptance") else self._task_context()
+            width = self.config.collective_width if self.config.proposals else 1
+            members = self._collective("supervisor", instruction, context, Plan, width=width)
+            plan = self._judge_plans(context, members)
             self.state["acceptance"] = plan.acceptance
             self._set_plan(plan)
         elif phase == "execute":
@@ -160,9 +164,12 @@ class SwarmEngine:
             self.state["phase"] = "synthesize"
             self._monitor("specialists_finished")
         elif phase == "synthesize":
-            self.state["draft"] = self._worker("synthesizer", "Produce the final deliverable. Reconcile specialist results, "
-                "inspect artifacts where useful, and disclose gaps. Return the actual answer, not a work plan.",
-                self._context(), key=f"r{self.state['round']}:synthesis")
+            instruction = ("Produce the final deliverable. Reconcile specialist results, "
+                "inspect artifacts where useful, and disclose gaps. Return the actual answer, not a work plan.")
+            width = self.config.collective_width if self.config.proposals else 1
+            drafts = self._collective_workers("synthesizer", instruction, self._context(),
+                                              f"r{self.state['round']}:synthesis", width)
+            self.state["draft"] = self._judge_drafts(drafts)
             self.state["phase"] = "review"
         elif phase == "review":
             evidence = self._worker("reviewer", "Independently audit the draft against the current acceptance criteria. "
@@ -189,6 +196,82 @@ class SwarmEngine:
                 return
             self.state["round"] += 1
             self._set_plan(review.repair)
+
+    def _collective_workers(self, role, instruction, context, key, width):
+        """Independent tool-using workers on different model families —
+        the worker counterpart of _collective, with the same narrowing
+        rules. Returns [(answer, family)], at least one."""
+        members: list[tuple] = []
+        heard: list[str] = []
+        for i in range(width):
+            member_key = key if i == 0 else f"{key}#{i + 1}"
+            avoid = heard if self.config.diverse_models else None
+            try:
+                answer = self._worker(role, instruction, context, member_key, avoid_families=avoid or None)
+            except (ReplanRequested, RunInterrupted, BudgetExceeded):
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if not members:
+                    raise
+                self.store.event("collective_narrowed", role=role, size=len(members),
+                                 reason=f"{type(exc).__name__}: {str(exc)[:300]}")
+                break
+            family = self.state["records"][member_key].get("family")
+            if family is not None and family in heard and self.config.diverse_models:
+                self.store.event("collective_narrowed", role=role, size=len(members),
+                                 reason=f"no other model family available (got {family} again)")
+                break
+            members.append((answer, family))
+            if family is not None:
+                heard.append(family)
+        self.store.event("collective", role=role, size=len(members), families=[f for _, f in members])
+        return members
+
+    def _judge(self, kind, context, proposals, families, schema):
+        """An independent judge — from a family none of the authors used —
+        critiques every proposal and picks one or merges them. A judge
+        that fails or picks a proposal that does not exist falls back to
+        the first proposal: the collective must never cost the answer."""
+        try:
+            choice, judge_family = self._structured_answer(
+                f"judge-{kind}",
+                f"You are an independent judge. {len(proposals)} {kind} proposals were written independently "
+                "by different models. Critique each one (strengths, flaws) against the task and acceptance "
+                "criteria, then choose the best (chosen = its 0-based index). If combining their strong parts "
+                "is clearly better than any single one, put the combined result in merged; otherwise merged=null.",
+                context + "\nPROPOSALS:\n" + json.dumps(proposals, ensure_ascii=False),
+                schema, avoid_families=[f for f in families if f] or None)
+        except (ReplanRequested, RunInterrupted, BudgetExceeded):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.store.event("judge_failed", subject=kind, error=f"{type(exc).__name__}: {str(exc)[:300]}")
+            return None
+        if choice.chosen >= len(proposals):
+            choice.chosen = 0
+        self.store.event("proposals_judged", subject=kind, families=families, judge_family=judge_family,
+                         chosen=choice.chosen, merged=choice.merged is not None,
+                         critiques=[c.model_dump() for c in choice.critiques][:5])
+        return choice
+
+    def _judge_plans(self, context, members) -> Plan:
+        plans = [value for value, _ in members]
+        if len(plans) == 1:
+            return plans[0]
+        choice = self._judge("plan", context, [p.model_dump() for p in plans],
+                             [f for _, f in members], PlanChoice)
+        if choice is None:
+            return plans[0]
+        return choice.merged or plans[choice.chosen]
+
+    def _judge_drafts(self, members) -> str:
+        drafts = [answer for answer, _ in members]
+        if len(drafts) == 1:
+            return drafts[0]
+        choice = self._judge("draft", self._context(), [d[:12000] for d in drafts],
+                             [f for _, f in members], DraftChoice)
+        if choice is None:
+            return drafts[0]
+        return choice.merged or drafts[choice.chosen]
 
     def _review_panel(self, context: str) -> Review:
         """Several reviewers from different model families judge the same
@@ -440,7 +523,7 @@ class SwarmEngine:
                 if errors:
                     raise next((e for e in errors if isinstance(e, BudgetExceeded)), errors[0])
 
-    def _worker(self, role, instruction, context, key, read_only=False):
+    def _worker(self, role, instruction, context, key, read_only=False, avoid_families=None):
         with self.budget.lock:
             record = self.state["records"].setdefault(key, {"history": [], "steps": 0, "status": "running"})
             if record["status"] == "done":
@@ -456,12 +539,14 @@ class SwarmEngine:
         while self.config.max_steps is None or record["steps"] < self.config.max_steps:
             self.budget.check()
             history = json.dumps(record["history"][-8:], ensure_ascii=False)
-            action = self._structured(key, system_instruction, context + "\nOBSERVATIONS:\n" + history, Action)
+            action, family = self._structured_answer(key, system_instruction,
+                                                     context + "\nOBSERVATIONS:\n" + history, Action,
+                                                     avoid_families=avoid_families)
             with self.budget.lock:
                 record["steps"] += 1
                 record["history"].append({"action": action.model_dump()})
                 if action.kind == "final":
-                    record.update(status="done", answer=action.answer)
+                    record.update(status="done", answer=action.answer, family=family)
                     self.budget.checkpoint()
                     self.store.event("task_done", task=key, role=role)
                     return action.answer
