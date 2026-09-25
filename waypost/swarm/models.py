@@ -30,6 +30,7 @@ class SwarmConfig(StrictModel):
     board: bool = True
     debate: bool = True
     debate_rounds: int = Field(default=1, ge=1, le=2)
+    memory: bool = True
 
 
 class Task(StrictModel):

@@ -450,3 +450,56 @@ def test_a_failed_speaker_does_not_fail_the_run(tmp_path):
     assert state["status"] == "completed"
     assert any(e["event"] == "debate_speaker_failed" for e in events)
     assert state["contradictions"]["1"] == ["[auditor] conflict"]
+
+
+# ----------------------------------------------------------- stage 6: memory
+
+
+def _memory(tmp_path):
+    path = tmp_path / "swarm-memory.jsonl"
+    return [json.loads(l) for l in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_a_lesson_is_saved_and_steers_the_next_plan(tmp_path):
+    first, _, _ = _run(tmp_path / "a", {
+        "supervisor": [_plan(), _plan()],
+        "progress-monitor": [{"action": "replan", "reason": "regex parsing broke on nested tags"}]
+                            + [{"action": "continue", "reason": "ok"}] * 5,
+        "r2:a": [_final()], "r2:synthesis": [_final("answer")], "r2:audit": [_final("ok")],
+        "review-verdict": [PASS]}, collective_width=1)
+    lessons = _memory(tmp_path)
+    assert len(lessons) == 1 and lessons[0]["passed"]
+    assert "regex parsing broke" in lessons[0]["dead_ends"][0]
+    assert lessons[0]["families_used"]["supervisor"] == ["llama"]
+
+    state, backend, _ = _run(tmp_path / "b", {"review-verdict": [PASS]}, collective_width=1)
+    assert "regex parsing broke on nested tags" in backend.prompts["supervisor"][0]
+    assert len(_memory(tmp_path)) == 2
+
+
+def test_a_family_that_keeps_failing_a_role_is_asked_last(tmp_path):
+    path = tmp_path / "swarm-memory.jsonl"
+    failing = {"task": "t", "passed": False, "families_used": {"supervisor": ["llama"]}}
+    path.write_text((json.dumps(failing) + "\n") * 2)
+    state, backend, _ = _run(tmp_path / "run", {"review-verdict": [PASS]}, collective_width=1)
+    assert backend.avoided["supervisor"] == ["llama"]
+
+
+def test_one_success_clears_a_family(tmp_path):
+    path = tmp_path / "swarm-memory.jsonl"
+    rows = [{"task": "t", "passed": False, "families_used": {"supervisor": ["llama"]}}] * 2 + \
+           [{"task": "t", "passed": True, "families_used": {"supervisor": ["llama"]}}]
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    state, backend, _ = _run(tmp_path / "run", {"review-verdict": [PASS]}, collective_width=1)
+    assert backend.avoided["supervisor"] == []
+
+
+def test_a_torn_memory_line_does_not_cost_the_run(tmp_path):
+    (tmp_path / "swarm-memory.jsonl").write_text('{"task": "t", "pass\n[1,2]\n')
+    state, backend, _ = _run(tmp_path / "run", {"review-verdict": [PASS]}, collective_width=1)
+    assert state["status"] == "completed"
+
+
+def test_memory_off_writes_nothing(tmp_path):
+    _run(tmp_path / "run", {"review-verdict": [PASS]}, collective_width=1, memory=False)
+    assert _memory(tmp_path) == []

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
+from datetime import datetime, timezone
 import json
+import re
 import threading
 from pathlib import Path
 from typing import Callable
@@ -32,6 +34,16 @@ AUTONOMOUS_FAILED_REVIEWS = 6
 # the debate into a call storm.
 DEBATE_SPEAKERS = 5
 
+# Memory across runs: one JSON line per finished run, next to the runs.
+MEMORY_FILE = "swarm-memory.jsonl"
+MEMORY_READ_LINES = 500
+MEMORY_LESSONS_SHOWN = 5
+# A family that failed a fixed role this often, and never passed it, is
+# asked last for that role (last, not never — it may still be the only one).
+MEMORY_POOR_FAILS = 2
+MEMORY_ROLES = ("supervisor", "review-verdict", "review-consensus", "judge-plan", "judge-draft",
+                "synthesis", "audit")
+
 # The shared board: what every agent sees of what the others learned.
 BOARD_KINDS = ("fact", "decision", "assumption", "dead_end")
 BOARD_TEXT_LIMIT = 500
@@ -54,6 +66,7 @@ class SwarmEngine:
         self.config = config or SwarmConfig()
         self.backend_factory = backend_factory
         self._board_lock = threading.Lock()
+        self._memory_cache: list[dict] | None = None
 
     def run(self, task: str | None = None, *, resume: bool = False,
             acknowledge_interrupted_tools: bool = False, base_url: str | None = None) -> dict:
@@ -137,6 +150,7 @@ class SwarmEngine:
         finally:
             if self.state["status"] == "completed" and self.config.board:
                 self._append_assumptions()
+            self._remember()
             self.budget.checkpoint()
             self.store.event("run_stopped", status=self.state["status"], calls=self.state["calls"],
                              error=self.state.get("error"))
@@ -170,6 +184,9 @@ class SwarmEngine:
                 " Inputs are under inputs/ if provided. List files to discover them. "
                 "Use dependencies only where outputs are required. Incorporate user corrections and monitor guidance.")
             context = self._context() if self.state.get("acceptance") else self._task_context()
+            if lessons := self._lessons():
+                context += "\nLESSONS FROM PREVIOUS RUNS (avoid their dead ends and failed findings):\n" + \
+                    json.dumps(lessons, ensure_ascii=False)
             width = self.config.collective_width if self.config.proposals else 1
             members = self._collective("supervisor", instruction, context, Plan, width=width)
             plan = self._judge_plans(context, members)
@@ -432,6 +449,101 @@ class SwarmEngine:
         shown = sorted(facts + others, key=lambda e: e["id"])
         return [{"kind": e["kind"], "text": e["text"], "author": e["author"]} for e in shown]
 
+    # ------------------------------------------------------------- memory
+    @staticmethod
+    def _role_of(name: str) -> str:
+        """'r3:synthesis#2' -> 'synthesis', 'review-verdict#3' -> 'review-verdict'."""
+        return re.sub(r"#\d+$", "", re.sub(r"^r\d+:", "", name))
+
+    def _note_family(self, role: str, family: str | None):
+        base = self._role_of(role)
+        if family is None or base not in MEMORY_ROLES:
+            return
+        with self._board_lock:
+            used = self.state.setdefault("families_used", {}).setdefault(base, [])
+            if family not in used:
+                used.append(family)
+
+    def _memory_path(self) -> Path:
+        return self.store.directory.parent / MEMORY_FILE
+
+    def _memory(self) -> list[dict]:
+        if self._memory_cache is None:
+            lessons: list[dict] = []
+            try:
+                lines = self._memory_path().read_text().splitlines()[-MEMORY_READ_LINES:]
+            except OSError:
+                lines = []
+            for line in lines:
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # a torn line must not cost the run
+                if isinstance(item, dict) and item.get("run") != self.store.directory.name:
+                    lessons.append(item)
+            self._memory_cache = lessons
+        return self._memory_cache
+
+    @staticmethod
+    def _words(text: str) -> set[str]:
+        return {w for w in re.findall(r"\w+", text.lower()) if len(w) >= 3}
+
+    def _lessons(self) -> list[dict]:
+        """The lessons of the most similar past tasks (word overlap)."""
+        if not self.config.memory:
+            return []
+        mine = self._words(self.state["task"])
+        scored = []
+        for item in self._memory():
+            theirs = self._words(item.get("task", ""))
+            overlap = len(mine & theirs) / (len(mine | theirs) or 1)
+            if overlap > 0 and (item.get("dead_ends") or item.get("findings") or item.get("passed")):
+                scored.append((overlap, item))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [{k: item.get(k) for k in ("task", "passed", "dead_ends", "findings")}
+                for _, item in scored[:MEMORY_LESSONS_SHOWN]]
+
+    def _poor_families(self, role: str) -> list[str]:
+        if not self.config.memory:
+            return []
+        base = self._role_of(role)
+        if base not in MEMORY_ROLES:
+            return []
+        passed: dict[str, int] = {}
+        failed: dict[str, int] = {}
+        for item in self._memory():
+            for family in (item.get("families_used") or {}).get(base, []):
+                bucket = passed if item.get("passed") else failed
+                bucket[family] = bucket.get(family, 0) + 1
+        return [f for f, n in failed.items() if n >= MEMORY_POOR_FAILS and not passed.get(f)]
+
+    def _remember(self):
+        """One lesson per finished run: what was tried, what failed, which
+        families held which role. Written once per terminal outcome."""
+        status = self.state.get("status")
+        if not self.config.memory or status not in {"completed", "failed", "budget_exhausted"}:
+            return
+        mark = f"{status}:{self.state.get('round')}"
+        if self.state.get("memory_written") == mark:
+            return
+        last = self.state["reviews"][-1] if self.state.get("reviews") else {}
+        lesson = {"time": datetime.now(timezone.utc).isoformat(), "run": self.store.directory.name,
+                  "task": self.state["task"][:500], "status": status, "rounds": self.state.get("round"),
+                  "passed": bool(last.get("passed")) and status == "completed"
+                            and not str(self.state.get("draft", "")).count("Завершено автономно"),
+                  "dead_ends": [e["text"] for e in self.state.get("board", []) if e["kind"] == "dead_end"][:8],
+                  "findings": [] if last.get("passed") else list(last.get("findings", []))[:8],
+                  "error": self.state.get("error"),
+                  "families_used": self.state.get("families_used", {})}
+        try:
+            with self._memory_path().open("a") as handle:
+                handle.write(json.dumps(lesson, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            self.store.event("memory_write_failed", error=str(exc)[:300])
+            return
+        self.state["memory_written"] = mark
+        self.store.event("lesson_saved", passed=lesson["passed"], dead_ends=len(lesson["dead_ends"]))
+
     def _append_assumptions(self):
         if self.state.get("assumptions_appended"):
             return
@@ -463,9 +575,10 @@ class SwarmEngine:
         width = width or self.config.collective_width
         members: list[tuple] = []
         heard: list[str] = []
+        poor = self._poor_families(role)
         for i in range(width):
             name = role if i == 0 else f"{role}#{i + 1}"
-            avoid = heard if self.config.diverse_models else None
+            avoid = (heard + [f for f in poor if f not in heard]) if self.config.diverse_models else None
             try:
                 value, family = self._structured_answer(name, instruction, context, schema,
                                                         avoid_families=avoid or None)
@@ -503,7 +616,9 @@ class SwarmEngine:
                 plan = value if isinstance(value, Plan) else getattr(value, "repair", None)
                 if plan and self.config.max_tasks is not None and len(plan.tasks) > self.config.max_tasks:
                     raise ValueError("Too many tasks for configured max_tasks")
-                return value, getattr(raw, "family", None)
+                family = getattr(raw, "family", None)
+                self._note_family(role, family)
+                return value, family
             except (ValueError, ValidationError) as exc:
                 attempt += 1
                 self.store.event("invalid_output", role=role, attempt=attempt,

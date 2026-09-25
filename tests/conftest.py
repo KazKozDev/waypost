@@ -29,3 +29,14 @@ def _isolated_settings(monkeypatch):
         if name.startswith("ROUTER_") and name != "ROUTER_ENV_FILE":
             monkeypatch.delenv(name, raising=False)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolated_swarm_memory(monkeypatch, tmp_path):
+    """Swarm memory lives next to the run directories. Every test's
+    tmp_path shares one parent, so without this the lessons of one test
+    would steer the plans and model choices of the next."""
+    from waypost.swarm.engine import SwarmEngine
+
+    path = tmp_path / "swarm-memory.jsonl"
+    monkeypatch.setattr(SwarmEngine, "_memory_path", lambda self: path)
