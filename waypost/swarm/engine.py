@@ -10,7 +10,7 @@ from typing import Callable
 from pydantic import ValidationError
 
 from .llm import Budget, BudgetExceeded, RunInterrupted, SwarmsBackend, parse_json
-from .models import Action, Plan, ProgressDecision, Review, SwarmConfig
+from .models import Action, Plan, ProgressDecision, Review, ReviewConsensus, SwarmConfig
 from .store import RunStore
 from .tools import WorkspaceTools
 
@@ -169,9 +169,7 @@ class SwarmEngine:
                 "Inspect actual files; check claims where tools permit. Report concrete failures and missing evidence. "
                 "Do not modify deliverables.", self._context(include_draft=True),
                 key=f"r{self.state['round']}:audit", read_only=True)
-            review = self._structured("review-verdict", "Decide whether the deliverable meets ALL current criteria. "
-                "Do not accept unverified claims just because another agent made them. If it fails, create a repair DAG; "
-                "otherwise repair=null.", self._context(include_draft=True) + "\nAUDIT:\n" + evidence, Review)
+            review = self._review_panel(self._context(include_draft=True) + "\nAUDIT:\n" + evidence)
             self.state["reviews"].append(review.model_dump())
             if review.passed:
                 self.state["failed_reviews"] = 0
@@ -191,6 +189,47 @@ class SwarmEngine:
                 return
             self.state["round"] += 1
             self._set_plan(review.repair)
+
+    def _review_panel(self, context: str) -> Review:
+        """Several reviewers from different model families judge the same
+        audit evidence; the majority decides.
+
+        One picky reviewer used to hold a finished deliverable in repair
+        rounds indefinitely. Now a finding blocks only when at least two
+        reviewers raised it: a lone objection is recorded, not enforced.
+        The tool-using audit stays single — it gathers facts; the panel
+        diversifies the judgement, which is where models disagree.
+        """
+        instruction = ("Decide whether the deliverable meets ALL current criteria. Do not accept unverified "
+                       "claims just because another agent made them. If it fails, create a repair DAG; "
+                       "otherwise repair=null.")
+        width = self.config.collective_width if self.config.review_panel else 1
+        members = self._collective("review-verdict", instruction, context, Review, width=width)
+        reviews = [value for value, _ in members]
+        if len(reviews) == 1:
+            return reviews[0]
+        votes = [{"family": family, "passed": value.passed, "findings": value.findings}
+                 for value, family in members]
+        passed = sum(r.passed for r in reviews)
+        failed = [r for r in reviews if not r.passed]
+        if passed * 2 > len(reviews) or len(failed) < 2:
+            # A majority passed, or only one reviewer objects: nothing is
+            # confirmed by two, so nothing blocks.
+            self.store.event("review_panel", passed=True, votes=votes, confirmed=[])
+            lone = [f for r in failed for f in r.findings]
+            return Review(passed=True, findings=["(не подтверждено панелью) " + f for f in lone][:12])
+        consensus = self._structured("review-consensus",
+            "You merge a review panel. Confirm a finding ONLY if at least two reviewers raised the same problem "
+            "in substance (wording may differ). Drop findings only one reviewer raised. If nothing is confirmed, "
+            "return confirmed=[] and repair=null; otherwise return a repair DAG that fixes the confirmed findings "
+            "and nothing else.",
+            context + "\nREVIEWS:\n" + json.dumps([r.model_dump() for r in reviews], ensure_ascii=False),
+            ReviewConsensus)
+        self.store.event("review_panel", passed=not consensus.confirmed, votes=votes,
+                         confirmed=consensus.confirmed)
+        if not consensus.confirmed:
+            return Review(passed=True, findings=[])
+        return Review(passed=False, findings=consensus.confirmed, repair=consensus.repair)
 
     def _finish_best_effort(self, reason: str):
         """The loop fuse. An autonomous swarm must end without a human: it

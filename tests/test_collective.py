@@ -144,3 +144,100 @@ def test_client_sends_avoid_families_and_reports_the_family(tmp_path, monkeypatc
                                                       avoid_families=["llama"])
     assert sent[0]["avoid_families"] == ["llama"]
     assert answer == '{"ok":true}' and answer.family == "openai"
+
+
+# -------------------------------------------------------- stage 2: panel
+
+
+def _plan(tasks=None):
+    return {"acceptance": ["Deliver an evidenced answer"], "tasks": tasks or [
+        {"id": "a", "role": "analyst", "instruction": "Compute", "depends_on": []}]}
+
+
+def _final(text="done"):
+    return {"kind": "final", "answer": text}
+
+
+PASS = {"passed": True, "findings": [], "repair": None}
+
+
+def _fail(finding):
+    return {"passed": False, "findings": [finding], "repair": _plan()}
+
+
+class FamilyScript:
+    """Scripted backend whose answers carry a model family per call index:
+    role -> list of values; `role#2` etc. answer from other families."""
+
+    FAMILIES = {"": "llama", "#2": "qwen", "#3": "gemma"}
+
+    def __init__(self, script):
+        self.script = {k: list(v) for k, v in script.items()}
+        self.calls = []
+
+    def factory(self, config, budget, store):
+        self.budget = budget
+        return self
+
+    def ask(self, role, system, prompt, schema=None, avoid_families=None):
+        self.calls.append(role)
+        if role == "progress-monitor" and role not in self.script:
+            return Answer(json.dumps({"action": "continue", "reason": "ok"}), None)
+        if role not in self.script or not self.script[role]:
+            raise KeyError(role)
+        self.budget.reserve()
+        suffix = role[role.index("#"):] if "#" in role else ""
+        return Answer(json.dumps(self.script[role].pop(0)), self.FAMILIES.get(suffix))
+
+
+def _run(tmp_path, script, **config):
+    base = {"supervisor": [_plan()], "r1:a": [_final()], "r1:synthesis": [_final("answer")],
+            "r1:audit": [_final("evidence")]}
+    backend = FamilyScript({**base, **script})
+    state = SwarmEngine(tmp_path, SwarmConfig(**config), backend.factory).run("Task")
+    events = [json.loads(l) for l in (tmp_path / "events.jsonl").read_text().splitlines()]
+    return state, backend, events
+
+
+def test_panel_majority_passes(tmp_path):
+    state, backend, events = _run(tmp_path, {
+        "review-verdict": [PASS], "review-verdict#2": [_fail("style")],
+        "review-verdict#3": [PASS]})
+    assert state["status"] == "completed" and state["round"] == 1
+    panel = next(e for e in events if e["event"] == "review_panel")
+    assert panel["passed"] and len(panel["votes"]) == 3
+    assert "review-consensus" not in backend.calls
+
+
+def test_panel_confirmed_finding_triggers_repair(tmp_path):
+    state, backend, events = _run(tmp_path, {
+        "review-verdict": [_fail("no tests"), PASS], "review-verdict#2": [_fail("tests missing"), PASS],
+        "review-verdict#3": [PASS, PASS],
+        "review-consensus": [{"confirmed": ["no tests"], "repair": _plan()}],
+        "r2:a": [_final()], "r2:synthesis": [_final("fixed")], "r2:audit": [_final("ok")]})
+    assert state["status"] == "completed" and state["round"] == 2
+    assert state["reviews"][0] == {"passed": False, "findings": ["no tests"],
+                                   "repair": _plan()}
+
+
+def test_panel_disagreeing_objections_do_not_block(tmp_path):
+    state, backend, events = _run(tmp_path, {
+        "review-verdict": [_fail("naming")], "review-verdict#2": [_fail("colours")],
+        "review-verdict#3": [PASS],
+        "review-consensus": [{"confirmed": [], "repair": None}]})
+    assert state["status"] == "completed" and state["round"] == 1
+
+
+def test_lone_objection_is_recorded_not_enforced(tmp_path):
+    state, backend, events = _run(tmp_path, {
+        "review-verdict": [_fail("I dislike it")], "review-verdict#2": [PASS],
+        "review-verdict#3": [PASS]})
+    assert state["status"] == "completed"
+    assert state["reviews"][0]["findings"] == ["(не подтверждено панелью) I dislike it"]
+
+
+def test_panel_off_is_a_single_reviewer(tmp_path):
+    state, backend, events = _run(tmp_path, {"review-verdict": [PASS]}, review_panel=False)
+    assert state["status"] == "completed"
+    assert backend.calls.count("review-verdict") == 1
+    assert not any(c.startswith("review-verdict#") for c in backend.calls)

@@ -31,7 +31,11 @@ class Scripted:
         self.budget = budget
         return self
 
-    def ask(self, role, system, prompt, schema=None):
+    def ask(self, role, system, prompt, schema=None, avoid_families=None):
+        # An unscripted role is an unreachable model: it fails before it
+        # costs a call (the collective narrows past it).
+        if role not in self.script and role != "progress-monitor":
+            raise KeyError(role)
         self.budget.reserve()
         with self.lock:
             self.prompts.append((role, prompt))

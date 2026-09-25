@@ -25,6 +25,7 @@ class SwarmConfig(StrictModel):
     # and whether each must come from a model family the others did not.
     collective_width: int = Field(default=3, ge=1, le=5)
     diverse_models: bool = True
+    review_panel: bool = True
 
 
 class Task(StrictModel):
@@ -90,3 +91,19 @@ class ProgressDecision(StrictModel):
     action: Literal["continue", "redirect", "replan", "needs_input"]
     reason: str = Field(min_length=1)
     guidance: str = ""
+
+
+class ReviewConsensus(StrictModel):
+    """What a review panel agrees on. Only findings that at least two
+    reviewers raised (in substance, not in wording) are confirmed; the
+    repair plan addresses those and nothing else."""
+    confirmed: list[str]
+    repair: Plan | None = None
+
+    @model_validator(mode="after")
+    def repair_matches_findings(self):
+        if self.confirmed and self.repair is None:
+            raise ValueError("confirmed findings require a repair plan")
+        if not self.confirmed and self.repair is not None:
+            raise ValueError("no confirmed findings means no repair plan")
+        return self
