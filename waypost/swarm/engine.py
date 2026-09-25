@@ -38,15 +38,20 @@ class SwarmEngine:
         self.backend_factory = backend_factory
 
     def run(self, task: str | None = None, *, resume: bool = False,
-            acknowledge_interrupted_tools: bool = False) -> dict:
+            acknowledge_interrupted_tools: bool = False, base_url: str | None = None) -> dict:
         with self.store.exclusive():
-            return self._run(task, resume, acknowledge_interrupted_tools)
+            return self._run(task, resume, acknowledge_interrupted_tools, base_url)
 
-    def _run(self, task, resume, acknowledge):
+    def _run(self, task, resume, acknowledge, base_url=None):
         if resume:
             self.state = self.store.load()
             saved = SwarmConfig.model_validate(self.state["config"])
-            # Resuming preserves execution settings and tool permissions.
+            # Resuming preserves execution settings and tool permissions, but
+            # inference goes to the router that is serving the app now.
+            if base_url and base_url != saved.base_url:
+                self.store.event("base_url_changed", previous=saved.base_url, current=base_url)
+                saved = saved.model_copy(update={"base_url": base_url})
+                self.state["config"] = saved.model_dump()
             self.config = saved
             self.store.update_control(interrupt=False)
             if self.state["status"] == "completed" and not self.store.control().get("messages"):

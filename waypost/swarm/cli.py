@@ -37,6 +37,7 @@ def main(argv=None):
     resume = commands.add_parser("resume", help="Continue a failed/interrupted run")
     resume.add_argument("run_dir", type=Path)
     resume.add_argument("--acknowledge-interrupted-tools", action="store_true")
+    resume.add_argument("--base-url", help="Waypost router to use instead of the saved one")
     status = commands.add_parser("status")
     status.add_argument("run_dir", type=Path)
     args = parser.parse_args(argv)
@@ -45,7 +46,8 @@ def main(argv=None):
             state = RunStore(args.run_dir).load()
         elif args.command == "resume":
             state = SwarmEngine(args.run_dir).run(resume=True,
-                acknowledge_interrupted_tools=args.acknowledge_interrupted_tools)
+                acknowledge_interrupted_tools=args.acknowledge_interrupted_tools,
+                base_url=args.base_url)
         else:
             directory = args.run_dir or Path("var/swarm") / uuid.uuid4().hex
             if (directory / "state.json").exists():

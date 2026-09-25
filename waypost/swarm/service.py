@@ -37,7 +37,8 @@ class SwarmService:
             raise RuntimeError("Swarms is not installed. Run: pip install -e '.[swarm]'")
         command = [sys.executable, "-m", "waypost.swarm"]
         if resume:
-            command += ["resume", str(directory), "--acknowledge-interrupted-tools"]
+            command += ["resume", str(directory), "--acknowledge-interrupted-tools",
+                        "--base-url", self.base_url]
         else:
             command += ["run", "--task-file", str(directory / "task.txt"),
                         "--run-dir", str(directory), "--base-url", self.base_url,

@@ -375,3 +375,22 @@ def test_real_swarms_preserves_budget_exception(tmp_path, monkeypatch):
     budget = Budget(config, {"calls": 1}, store)
     with pytest.raises(BudgetExceeded):
         SwarmsBackend(config, budget, store).ask("test", "Only JSON", "test")
+
+
+def test_resume_uses_current_router_instead_of_saved_one(tmp_path):
+    backend = script(**{"supervisor": [plan(), plan()],
+                        "r2:a": [final("changed")], "r2:synthesis": [final("updated")],
+                        "r2:audit": [final("checked")],
+                        "review-verdict": [{"passed": True, "findings": [], "repair": None},
+                                           {"passed": True, "findings": [], "repair": None}]})
+    engine = SwarmEngine(tmp_path, SwarmConfig(base_url="http://127.0.0.1:8081/v1"),
+                         backend_factory=backend.factory)
+    assert engine.run("Original task")["status"] == "completed"
+    engine.store.update_control(message="Change the result")
+    resumed = SwarmEngine(tmp_path, backend_factory=backend.factory)
+    state = resumed.run(resume=True, base_url="http://127.0.0.1:8080/v1")
+    assert state["status"] == "completed"
+    assert resumed.config.base_url == "http://127.0.0.1:8080/v1"
+    assert RunStore(tmp_path).load()["config"]["base_url"] == "http://127.0.0.1:8080/v1"
+    events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert any(e["event"] == "base_url_changed" and e["previous"].endswith(":8081/v1") for e in events)

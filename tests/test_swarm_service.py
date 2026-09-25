@@ -57,3 +57,22 @@ def test_correction_does_not_restart_interrupted_run_until_resume(tmp_path, monk
     assert service.status(run_id)["pending_messages"][0]["text"] == "Include an example"
     service.resume(run_id)
     assert launched[-1]["resume"] is True
+
+
+def test_resume_launch_passes_current_router(tmp_path, monkeypatch):
+    import importlib.util
+    import subprocess
+    service = SwarmService(tmp_path, "http://127.0.0.1:8080/v1")
+    directory = tmp_path / uuid.uuid4().hex
+    directory.mkdir()
+    commands = []
+
+    class Fake:
+        pid = 424242
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: commands.append(command) or Fake())
+    service._launch(directory, resume=True)
+    command = commands[0]
+    assert "resume" in command
+    assert command[command.index("--base-url") + 1] == "http://127.0.0.1:8080/v1"
