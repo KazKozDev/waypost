@@ -101,6 +101,13 @@ def build_payload(
         num_predict = payload.get("max_tokens") or o.max_output or 4096
         payload["options"] = {**payload.get("options", {}), "num_predict": num_predict}
 
+    if o.is_local and "mlx" not in o.provider.lower() and not getattr(req, "thinking_mode", False):
+        # Local Ollama models (qwen3.x) think by default. Unasked-for
+        # thinking is the local tail's whole cost: 18 s instead of 0.9 s for
+        # a one-line answer, and on long tasks it ate the entire token
+        # budget and returned a truncated reply after 15 minutes.
+        payload["reasoning_effort"] = "none"
+
     if getattr(req, "thinking_mode", False):
         if "mlx" in o.provider.lower():
             payload["enable_thinking"] = True

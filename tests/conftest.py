@@ -40,3 +40,20 @@ def _isolated_swarm_memory(monkeypatch, tmp_path):
 
     path = tmp_path / "swarm-memory.jsonl"
     monkeypatch.setattr(SwarmEngine, "_memory_path", lambda self: path)
+
+
+@pytest.fixture(autouse=True)
+def _no_swarm_retry_pause(monkeypatch):
+    """Retrying a failed model call pauses in production; tests need the
+    retries, not the waiting."""
+    from waypost.swarm.engine import SwarmEngine
+
+    monkeypatch.setattr(SwarmEngine, "RETRY_BACKOFF_S", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _no_swarm_outage_pause(monkeypatch):
+    from waypost.swarm.engine import SwarmEngine
+
+    monkeypatch.setattr(SwarmEngine, "OUTAGE_BACKOFF_S", 0.0)
+    monkeypatch.setattr(SwarmEngine, "MODEL_OUTAGE_BACKOFF_S", 0.0)

@@ -189,9 +189,12 @@ class FamilyScript:
             return Answer(json.dumps({"action": "continue", "reason": "ok"}), None)
         if role not in self.script or not self.script[role]:
             raise KeyError(role)
+        value = self.script[role].pop(0)
+        if isinstance(value, Exception):
+            raise value
         self.budget.reserve()
         suffix = role[role.index("#"):] if "#" in role else ""
-        return Answer(json.dumps(self.script[role].pop(0)), self.FAMILIES.get(suffix))
+        return Answer(json.dumps(value), self.FAMILIES.get(suffix))
 
 
 def _run(tmp_path, script, **config):
@@ -503,3 +506,75 @@ def test_a_torn_memory_line_does_not_cost_the_run(tmp_path):
 def test_memory_off_writes_nothing(tmp_path):
     _run(tmp_path / "run", {"review-verdict": [PASS]}, collective_width=1, memory=False)
     assert _memory(tmp_path) == []
+
+
+# ------------------------------------------------ resilience of model calls
+
+
+def test_truncated_answer_is_retried_with_more_room(tmp_path, monkeypatch):
+    from waypost.swarm.llm import WaypostLLM
+    store = RunStore(tmp_path)
+    config = SwarmConfig(max_tokens=4096)
+    budget = Budget(config, {"calls": 0}, store)
+    sent = []
+
+    def post(self, url, **kwargs):
+        sent.append(kwargs["json"]["max_tokens"])
+        finish = "length" if len(sent) == 1 else "stop"
+        return httpx.Response(200, request=httpx.Request("POST", url), json={
+            "choices": [{"message": {"content": '{"ok":true}'}, "finish_reason": finish}]})
+
+    monkeypatch.setattr(httpx.Client, "post", post)
+    llm = WaypostLLM(config, budget, store, "s", "system")
+    assert llm.run("task") == '{"ok":true}'
+    assert sent == [4096, 8192] and budget.state["calls"] == 2
+
+
+def test_models_back_after_an_outage_continue_the_same_step(tmp_path):
+    """Nobody answering says nothing about the approach: the same step is
+    retried after a pause, no replan, no dead end on the board."""
+    down = [RuntimeError("502")] * 3
+    state, backend, events = _run(tmp_path, {
+        "r1:synthesis": down + [_final("answer")], "review-verdict": [PASS]}, collective_width=1)
+    assert state["status"] == "completed" and state["round"] == 1
+    assert state["draft"] == "answer"
+    assert any(e["event"] == "waiting_for_models" for e in events)
+    assert not any(e["event"] == "replan" for e in events)
+
+
+def test_models_that_never_come_back_end_the_run_honestly(tmp_path):
+    state, backend, events = _run(tmp_path, {
+        "r1:synthesis": [RuntimeError("502")] * 60, "review-verdict": [PASS]}, collective_width=1)
+    assert state["status"] == "failed"
+    assert "без результата" in state["error"]
+    waits = [e for e in events if e["event"] == "waiting_for_models"]
+    assert len(waits) == SwarmEngine.MODEL_OUTAGE_WAITS
+
+
+def test_router_restart_is_waited_out_not_counted(tmp_path):
+    connect = httpx.ConnectError("Connection refused")
+    state, backend, events = _run(tmp_path, {
+        "r1:synthesis": [connect] * 5 + [_final("answer")], "review-verdict": [PASS]},
+        collective_width=1)
+    assert state["status"] == "completed" and state["draft"] == "answer"
+    assert sum(e["event"] == "router_unreachable" for e in events) == 5
+    assert not any(e["event"] in ("model_call_failed", "waiting_for_models") for e in events)
+
+
+def test_local_model_is_the_tail_not_the_lead(tmp_path):
+    cloud = _offering("gemma-27b", 0.5)
+    local = Offering(provider="local", model_id="qwen3.8:27b", base_url="http://l/v1",
+                     caps=CAPS, quality_score=0.99, is_local=True, trains_on_data=False)
+    ledger = Ledger(str(tmp_path / "r.db"))
+    for o in (cloud, local):
+        ledger.register(o)
+    req = ChatRequest(messages=[ChatMessage(role="user", content="hi")], latency_class="batch")
+
+    def ladder(**kw):
+        router = Router(Registry([cloud, local]), ledger, CircuitBreaker(), stochastic=False, **kw)
+        return [c.offering.key for c in router.plan(req, classify_l0(req))]
+
+    assert ladder()[0] == "local/qwen3.8:27b"  # scoring alone lets local lead
+    assert ladder(local_last=True) == ["gemma/gemma-27b", "local/qwen3.8:27b"]
+    router = Router(Registry([local]), ledger, CircuitBreaker(), stochastic=False, local_last=True)
+    assert [c.offering.key for c in router.plan(req, classify_l0(req))] == ["local/qwen3.8:27b"]

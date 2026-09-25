@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     # Thompson draw instead of the posterior mean when scoring: the noise
     # is what keeps a burst from stampeding onto one provider.
     stochastic_routing: bool = True
+    # Local models are the fallback tail, never the lead (see Router).
+    # False lets a local model lead when it scores best, to save quota.
+    local_last: bool = True
 
     # L1 classifier: requires `pip install model2vec` and a trained head.
     # Off by default — heuristics cover most cases.

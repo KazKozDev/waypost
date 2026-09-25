@@ -73,6 +73,13 @@ class EmptyAnswer(ValueError):
     pass
 
 
+class TruncatedAnswer(ValueError):
+    pass
+
+
+MAX_TOKENS_CEILING = 32768
+
+
 class Answer(str):
     """Model text that remembers which model family wrote it — the
     collective needs that to ask the next member someone else."""
@@ -143,6 +150,23 @@ class WaypostLLM:
             payload["avoid_families"] = self.avoid_families
         if self.config.privacy == "strict":
             payload["privacy"] = "strict"
+        try:
+            content = self._exchange(payload)
+        except TruncatedAnswer as exc:
+            # A cut-off answer is a budget problem, not a model failure: one
+            # more try with twice the room before the swarm gives up on it.
+            if payload["max_tokens"] >= MAX_TOKENS_CEILING:
+                raise
+            payload["max_tokens"] = min(MAX_TOKENS_CEILING, payload["max_tokens"] * 2)
+            payload["idempotency_key"] = str(uuid.uuid4())
+            self.store.event("llm_error", session=self.session, status=200,
+                             error=f"{exc} — повтор с max_tokens={payload['max_tokens']}")
+            self.budget.reserve()
+            content = self._exchange(payload)
+        self.last_response = content
+        return content
+
+    def _exchange(self, payload: dict) -> str:
         timeout = min(self.config.request_timeout, self.budget.remaining())
         headers = {"Authorization": "Bearer " + os.getenv("WAYPOST_API_KEY", "unused")}
         # A router call can take minutes while Waypost walks its ladder; say
@@ -182,7 +206,7 @@ class WaypostLLM:
             raise ValueError(f"Waypost returned no choices (provider={router.get('provider')}, model={router.get('model')})")
         choice = choices[0]
         if choice.get("finish_reason") == "length":
-            raise ValueError("Waypost response was truncated; increase max_tokens")
+            raise TruncatedAnswer(f"Waypost response was truncated at max_tokens={payload['max_tokens']}")
         content = choice["message"].get("content")
         if not isinstance(content, str) or not content.strip():
             raise EmptyAnswer("Waypost returned no text")
@@ -191,7 +215,6 @@ class WaypostLLM:
         self.store.event("llm_response", session=self.session,
                          router=data.get("router", {}), usage=data.get("usage", {}),
                          seconds=round(time.monotonic() - started, 1))
-        self.last_response = content
         return content
 
 

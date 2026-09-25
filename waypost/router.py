@@ -141,8 +141,14 @@ class Router:
         neighbors: NeighborIndex | None = None,
         escalation_threshold: float = 0.5,
         escalation_trust: float = 0.6,
+        local_last: bool = False,
     ):
         self.registry = registry
+        # Local models as the fallback tail only, never the lead. Batch
+        # scoring ignores latency and charges cloud quota, so without this a
+        # slow local model wins every background call — a 27B on a laptop
+        # answering in 80-110 s while the cloud idles.
+        self.local_last = local_last
         self.ledger = ledger
         self.breaker = breaker
         self.bandit = bandit
@@ -576,6 +582,9 @@ class Router:
         # ladder ends with one — the free, always-available last rung.
         if req.profile == "privacy_only":
             head = (local_cands + cloud_cands)[:limit]
+        elif self.local_last and cloud_cands:
+            head = cloud_cands[: max(1, limit - 1)] + local_cands[:1] if local_cands \
+                else cloud_cands[:limit]
         else:
             merged = sorted(cloud_cands + local_cands, key=order)
             head = merged[:limit]

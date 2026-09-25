@@ -401,6 +401,7 @@ async def lifespan(app: FastAPI):
         inflight=inflight,
         stochastic=settings.stochastic_routing,
         neighbors=neighbors if settings.enable_neighbors else None,
+        local_last=settings.local_last,
     )
     app.state.executor = Executor(
         adapter,

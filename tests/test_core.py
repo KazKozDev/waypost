@@ -526,3 +526,18 @@ def test_402_switches_instead_of_stopping_the_ladder():
     err = classify_error(402, body)
     assert err.verdict is Verdict.SWITCH
     assert err.retry_after_s >= 3600
+
+
+def test_local_ollama_does_not_think_unless_asked():
+    """qwen3.x on local Ollama thinks by default: 18 s instead of 0.9 s, and
+    on long tasks a truncated reply after 15 minutes."""
+    from waypost.prefix import build_payload
+    from waypost.schemas import ChatRequest
+
+    msgs = [{"role": "user", "content": "hi"}]
+    local = offering(name="local", model="qwen3.8:27b-mlx", is_local=True)
+    cloud = offering(name="ollama", model="cloud/gpt-oss:120b")
+    assert build_payload(ChatRequest(messages=msgs), local)["reasoning_effort"] == "none"
+    assert "reasoning_effort" not in build_payload(
+        ChatRequest(messages=msgs, thinking_mode=True), local)
+    assert "reasoning_effort" not in build_payload(ChatRequest(messages=msgs), cloud)

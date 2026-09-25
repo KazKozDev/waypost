@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from waypost.swarm import SwarmConfig, SwarmEngine
-from waypost.swarm.llm import Budget, BudgetExceeded, WaypostLLM, SwarmsBackend
+from waypost.swarm.llm import Budget, BudgetExceeded, RunInterrupted, WaypostLLM, SwarmsBackend
 from waypost.swarm.models import Plan
 from waypost.swarm.store import RunStore
 from waypost.swarm.tools import WorkspaceTools
@@ -95,12 +95,22 @@ def test_budget_failure_is_not_success(tmp_path):
 
 
 def test_resume_does_not_repeat_finished_task(tmp_path):
-    backend = script(**{"r1:synthesis": [RuntimeError("outage"), final("recovered")]})
+    backend = script(**{"r1:synthesis": [RunInterrupted("stop"), final("recovered")]})
     engine = SwarmEngine(tmp_path, backend_factory=backend.factory)
-    assert engine.run("Task")["status"] == "failed"
+    assert engine.run("Task")["status"] == "interrupted"
     state = engine.run(resume=True)
     assert state["status"] == "completed"
     assert sum(role == "r1:a" for role, _ in backend.prompts) == 1
+
+
+def test_model_outage_is_retried_not_fatal(tmp_path):
+    """A 502 or timeout is the router's bad moment, not the task failing:
+    the swarm retries the call and carries on in the same run."""
+    backend = script(**{"r1:synthesis": [RuntimeError("outage"), final("recovered")]})
+    state = SwarmEngine(tmp_path, backend_factory=backend.factory).run("Task")
+    assert state["status"] == "completed" and state["draft"] == "recovered"
+    events = [json.loads(l)["event"] for l in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert "model_call_failed" in events
 
 
 def test_parallel_dependencies(tmp_path):
@@ -334,9 +344,10 @@ def test_reviewer_cannot_write(tmp_path):
 
 
 def test_interrupted_tool_requires_acknowledgment(tmp_path):
-    backend = script(**{"r1:synthesis": [RuntimeError("outage"), final("recovered")]})
+    backend = script(**{"r1:synthesis": [RunInterrupted("stop"), final("recovered")]})
     engine = SwarmEngine(tmp_path, backend_factory=backend.factory)
     state = engine.run("Task")
+    assert state["status"] == "interrupted"
     state["records"]["r1:a"]["pending_tool"] = {"tool": "write_file"}
     engine.store.save(state)
     with pytest.raises(RuntimeError, match="outcome is unknown"):

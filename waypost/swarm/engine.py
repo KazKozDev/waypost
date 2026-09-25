@@ -7,9 +7,11 @@ from datetime import datetime, timezone
 import json
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
+import httpx
 from pydantic import ValidationError
 
 from .llm import Budget, BudgetExceeded, RunInterrupted, SwarmsBackend, parse_json
@@ -59,7 +61,25 @@ class NeedsInput(RuntimeError):
     pass
 
 
+class ModelUnavailable(RuntimeError):
+    """No model answered a call after retries. For a collective member it
+    narrows the collective; for anything else the run replans around it —
+    the loop fuse, not a crash, is what ends a run the router cannot serve."""
+
+
 class SwarmEngine:
+    # Pause between retries of a failed model call: attempt n waits n * this.
+    RETRY_BACKOFF_S = 3.0
+    # The router itself unreachable (restarting, down): wait for it rather
+    # than count it against the task — up to this long per call, with the
+    # pause doubling from OUTAGE_BACKOFF_S to a minute.
+    ROUTER_OUTAGE_WAIT_S = 900.0
+    OUTAGE_BACKOFF_S = 5.0
+    # No model answered at all: retry the same step after a pause growing by
+    # MODEL_OUTAGE_BACKOFF_S, up to MODEL_OUTAGE_WAITS times without progress.
+    MODEL_OUTAGE_BACKOFF_S = 30.0
+    MODEL_OUTAGE_WAITS = 6
+
     def __init__(self, directory: str | Path, config: SwarmConfig | None = None,
                  backend_factory: Callable = SwarmsBackend):
         self.store = RunStore(Path(directory))
@@ -122,6 +142,21 @@ class SwarmEngine:
                 self._ingest_messages()
                 try:
                     self._advance_phase()
+                    # Progress is a step that completed, not any one answer:
+                    # the monitor answering while synthesis never does is
+                    # still an outage.
+                    self.state["outage_waits"] = 0
+                except ModelUnavailable as exc:
+                    # Nobody answered: that says nothing about the approach, so
+                    # it is not replanned — the same step runs again after a
+                    # pause. Only a long outage with no progress ends the run.
+                    waits = self.state["outage_waits"] = self.state.get("outage_waits", 0) + 1
+                    if waits > self.MODEL_OUTAGE_WAITS:
+                        self._finish_best_effort(f"models unavailable for {waits - 1} retries: {exc}")
+                    else:
+                        pause = self.MODEL_OUTAGE_BACKOFF_S * waits
+                        self.store.event("waiting_for_models", attempt=waits, seconds=pause, reason=str(exc)[:300])
+                        self._wait(pause)
                 except ReplanRequested as exc:
                     if self.store.control().get("messages"):
                         self.store.event("correction_pending")
@@ -136,7 +171,7 @@ class SwarmEngine:
                             self.state["phase"] = "plan"
                             self.state["monitor_guidance"] = str(exc)
                             self.store.event("replan", reason=str(exc), round=self.state["round"])
-                if self.state["status"] in {"completed", "needs_attention"}:
+                if self.state["status"] in {"completed", "needs_attention", "failed"}:
                     break
                 self.budget.checkpoint()
         except BudgetExceeded as exc:
@@ -239,34 +274,43 @@ class SwarmEngine:
             self.state["round"] += 1
             self._set_plan(review.repair)
 
+    def _note_collective(self, role, width, members, narrowed):
+        families = [f for _, f in members]
+        self.state["collective_last"] = {"role": role, "size": len(members), "width": width,
+                                         "families": families, "reason": narrowed}
+        self.store.event("collective", role=role, size=len(members), width=width,
+                         families=families, reason=narrowed)
+
     def _collective_workers(self, role, instruction, context, key, width):
         """Independent tool-using workers on different model families —
         the worker counterpart of _collective, with the same narrowing
         rules. Returns [(answer, family)], at least one."""
         members: list[tuple] = []
         heard: list[str] = []
+        narrowed: str | None = None
         for i in range(width):
             member_key = key if i == 0 else f"{key}#{i + 1}"
             avoid = heard if self.config.diverse_models else None
             try:
-                answer = self._worker(role, instruction, context, member_key, avoid_families=avoid or None)
+                answer = self._worker(role, instruction, context, member_key, avoid_families=avoid or None,
+                                      max_failures=3 if i == 0 else 1)
             except (ReplanRequested, RunInterrupted, BudgetExceeded):
                 raise
             except Exception as exc:  # noqa: BLE001
                 if not members:
                     raise
-                self.store.event("collective_narrowed", role=role, size=len(members),
-                                 reason=f"{type(exc).__name__}: {str(exc)[:300]}")
+                narrowed = f"{type(exc).__name__}: {str(exc)[:300]}"
+                self.store.event("collective_narrowed", role=role, size=len(members), reason=narrowed)
                 break
             family = self.state["records"][member_key].get("family")
             if family is not None and family in heard and self.config.diverse_models:
-                self.store.event("collective_narrowed", role=role, size=len(members),
-                                 reason=f"no other model family available (got {family} again)")
+                narrowed = f"no other model family available (got {family} again)"
+                self.store.event("collective_narrowed", role=role, size=len(members), reason=narrowed)
                 break
             members.append((answer, family))
             if family is not None:
                 heard.append(family)
-        self.store.event("collective", role=role, size=len(members), families=[f for _, f in members])
+        self._note_collective(role, width, members, narrowed)
         return members
 
     def _debate(self):
@@ -301,7 +345,7 @@ class SwarmEngine:
                 if debate_round > 1:
                     context["claimed_contradictions"] = claimed
                 try:
-                    rebuttal = self._structured(
+                    rebuttal, _ = self._structured_answer(
                         f"{prefix}debate:{task.id}" + ("" if debate_round == 1 else f"#{debate_round}"),
                         f"You are the {task.role}. Read the other specialists' results. "
                         + ("List concrete contradictions between the results (or with your own) and the "
@@ -309,7 +353,7 @@ class SwarmEngine:
                            if debate_round == 1 else
                            "Of claimed_contradictions, keep only those that still stand after reading all "
                            "results; drop any your own result already disproves. Empty lists if none."),
-                        json.dumps(context, ensure_ascii=False), Rebuttal)
+                        json.dumps(context, ensure_ascii=False), Rebuttal, max_failures=1)
                 except (ReplanRequested, RunInterrupted, BudgetExceeded):
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -338,7 +382,7 @@ class SwarmEngine:
                 "criteria, then choose the best (chosen = its 0-based index). If combining their strong parts "
                 "is clearly better than any single one, put the combined result in merged; otherwise merged=null.",
                 context + "\nPROPOSALS:\n" + json.dumps(proposals, ensure_ascii=False),
-                schema, avoid_families=[f for f in families if f] or None)
+                schema, avoid_families=[f for f in families if f] or None, max_failures=1)
         except (ReplanRequested, RunInterrupted, BudgetExceeded):
             raise
         except Exception as exc:  # noqa: BLE001
@@ -412,10 +456,23 @@ class SwarmEngine:
             return Review(passed=True, findings=[])
         return Review(passed=False, findings=consensus.confirmed, repair=consensus.repair)
 
+    def _wait(self, seconds: float):
+        """Sleep that still honours pause and interrupt."""
+        deadline = time.monotonic() + seconds
+        while (left := deadline - time.monotonic()) > 0:
+            self.budget.check()
+            time.sleep(min(1.0, left))
+
     def _finish_best_effort(self, reason: str):
         """The loop fuse. An autonomous swarm must end without a human: it
         delivers the best draft it has and says plainly what did not pass,
-        instead of repairing forever or stopping to ask."""
+        instead of repairing forever or stopping to ask. With no draft at
+        all there is nothing to deliver, and calling that completed would
+        be a lie: it is a failure, with the reason."""
+        if not (self.state.get("draft") or "").strip():
+            self.state.update(status="failed", error="Завершено автономно без результата: " + reason)
+            self.store.event("autonomous_finish", reason=reason, delivered=False)
+            return
         findings = (self.state["reviews"][-1]["findings"] if self.state["reviews"] else [])
         note = "\n\n---\nЗавершено автономно: " + reason + "."
         if findings:
@@ -575,42 +632,71 @@ class SwarmEngine:
         width = width or self.config.collective_width
         members: list[tuple] = []
         heard: list[str] = []
+        narrowed: str | None = None
         poor = self._poor_families(role)
         for i in range(width):
             name = role if i == 0 else f"{role}#{i + 1}"
             avoid = (heard + [f for f in poor if f not in heard]) if self.config.diverse_models else None
             try:
                 value, family = self._structured_answer(name, instruction, context, schema,
-                                                        avoid_families=avoid or None)
+                                                        avoid_families=avoid or None,
+                                                        max_failures=3 if i == 0 else 1)
             except (ReplanRequested, RunInterrupted, BudgetExceeded):
                 raise
             except Exception as exc:  # noqa: BLE001
                 if not members:
                     raise
-                self.store.event("collective_narrowed", role=role, size=len(members),
-                                 reason=f"{type(exc).__name__}: {str(exc)[:300]}")
+                narrowed = f"{type(exc).__name__}: {str(exc)[:300]}"
+                self.store.event("collective_narrowed", role=role, size=len(members), reason=narrowed)
                 break
             if family is not None and family in heard and self.config.diverse_models:
-                self.store.event("collective_narrowed", role=role, size=len(members),
-                                 reason=f"no other model family available (got {family} again)")
+                narrowed = f"no other model family available (got {family} again)"
+                self.store.event("collective_narrowed", role=role, size=len(members), reason=narrowed)
                 break
             members.append((value, family))
             if family is not None:
                 heard.append(family)
-        self.store.event("collective", role=role, size=len(members),
-                         families=[f for _, f in members])
+        self._note_collective(role, width, members, narrowed)
         return members
 
-    def _structured_answer(self, role, instruction, context, schema, avoid_families=None):
+    def _structured_answer(self, role, instruction, context, schema, avoid_families=None,
+                           max_failures=3):
         prompt = context
         system = RULES + instruction + "\nSCHEMA:\n" + json.dumps(schema.model_json_schema())
         attempt = 0
+        failures = 0
+        outage_started: float | None = None
+        outage_pause = 0.0
         while True:
             if self.store.control().get("messages"):
                 raise ReplanRequested("User correction pending")
-            raw = (self.backend.ask(role, system, prompt, schema=schema.model_json_schema(),
-                                    avoid_families=avoid_families) if avoid_families else
-                   self.backend.ask(role, system, prompt, schema=schema.model_json_schema()))
+            try:
+                raw = (self.backend.ask(role, system, prompt, schema=schema.model_json_schema(),
+                                        avoid_families=avoid_families) if avoid_families else
+                       self.backend.ask(role, system, prompt, schema=schema.model_json_schema()))
+            except (RunInterrupted, BudgetExceeded, ReplanRequested):
+                raise
+            except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+                # The router is not there (restarting, crashed): wait for it.
+                # This is not the model failing, and must not burn retries.
+                outage_started = outage_started or time.monotonic()
+                waited = time.monotonic() - outage_started
+                if waited >= self.ROUTER_OUTAGE_WAIT_S:
+                    raise ModelUnavailable(f"{role}: router unreachable for {waited:.0f}s ({exc})") from exc
+                outage_pause = min(60.0, max(self.OUTAGE_BACKOFF_S, outage_pause * 2))
+                self.store.event("router_unreachable", role=role, waited=round(waited), next_try_s=outage_pause)
+                self._wait(outage_pause)
+                continue
+            except Exception as exc:  # noqa: BLE001
+                # A 502, a timeout, a truncated or empty reply: the router had
+                # a bad moment, the task did not fail. Retry, then hand it on.
+                failures += 1
+                detail = f"{type(exc).__name__}: {str(exc)[:300]}"
+                self.store.event("model_call_failed", role=role, failure=failures, error=detail)
+                if failures >= max_failures:
+                    raise ModelUnavailable(f"{role}: no model answered after {failures} tries ({detail})") from exc
+                time.sleep(self.RETRY_BACKOFF_S * failures)
+                continue
             try:
                 value = schema.model_validate(parse_json(raw))
                 plan = value if isinstance(value, Plan) else getattr(value, "repair", None)
@@ -760,7 +846,8 @@ class SwarmEngine:
                 if errors:
                     raise next((e for e in errors if isinstance(e, BudgetExceeded)), errors[0])
 
-    def _worker(self, role, instruction, context, key, read_only=False, avoid_families=None):
+    def _worker(self, role, instruction, context, key, read_only=False, avoid_families=None,
+                max_failures=3):
         with self.budget.lock:
             record = self.state["records"].setdefault(key, {"history": [], "steps": 0, "status": "running"})
             if record["status"] == "done":
@@ -784,7 +871,8 @@ class SwarmEngine:
             history = json.dumps(record["history"][-8:], ensure_ascii=False)
             action, family = self._structured_answer(key, system_instruction,
                                                      context + "\nOBSERVATIONS:\n" + history, Action,
-                                                     avoid_families=avoid_families)
+                                                     avoid_families=avoid_families,
+                                                     max_failures=max_failures)
             with self.budget.lock:
                 record["steps"] += 1
                 record["history"].append({"action": action.model_dump()})

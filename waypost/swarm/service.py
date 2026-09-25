@@ -99,6 +99,8 @@ class SwarmService:
                 "pending_messages": control.get("messages", []),
                 "running": self._running(directory),
                 "monitor": state.get("monitor", [])[-5:],
+                "board": state.get("board", [])[-60:],
+                "collective": state.get("collective_last"),
                 "artifacts": [str(p.relative_to(directory / "workspace")) for p in
                               sorted((directory / "workspace" / "artifacts").rglob("*")) if p.is_file()]}
 

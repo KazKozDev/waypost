@@ -386,12 +386,19 @@ html,body{height:100%;overflow:hidden}
 .feed-item.result .feed-text{border-left:2px solid var(--green);padding:3px 0 3px 12px}
 .feed-log{border-top:1px solid var(--border-light);padding:9px 0;color:var(--text-secondary);font-size:12px;display:flex;gap:12px;align-items:baseline;min-width:0}
 .feed-log .log-time{font-family:var(--font-mono);font-size:10px;color:var(--text-muted);width:58px;flex:none}.feed-log .log-label{font-weight:650;color:var(--text);min-width:110px}.feed-log .log-detail{white-space:pre-wrap;overflow-wrap:anywhere;min-width:0}
+.swarm-board{border-bottom:1px solid var(--border-light);background:var(--card);padding:0 24px}
+.swarm-board summary{cursor:pointer;font-size:12px;font-weight:650;color:var(--text-secondary);padding:8px 0;list-style:none}
+.swarm-board summary::-webkit-details-marker{display:none}.swarm-board summary::before{content:"▸ ";color:var(--text-muted)}.swarm-board[open] summary::before{content:"▾ "}
+.board-list{max-width:850px;margin:0 auto;max-height:30vh;overflow:auto;padding:0 0 10px}
+.board-entry{display:flex;gap:10px;font-size:12px;line-height:1.5;padding:4px 0;border-top:1px solid var(--border-light);min-width:0}
+.board-kind{flex:none;width:86px;font-weight:650;color:var(--text)}.board-kind.dead_end{color:var(--red)}.board-kind.assumption{color:var(--amber)}.board-kind.decision{color:var(--green)}
+.board-text{white-space:pre-wrap;overflow-wrap:anywhere;min-width:0;color:var(--text-secondary)}.board-author{color:var(--text-muted)}
 .swarm-composer{padding:12px 20px 15px;background:var(--card);border-top:1px solid var(--border-light)}
 .composer-inner{max-width:850px;margin:auto}.composer-box{display:flex;gap:10px;align-items:flex-end;border:1px solid var(--border);border-radius:12px;background:var(--card);box-shadow:0 2px 7px rgba(0,0,0,.035);padding:9px 9px 9px 14px}
 .composer-box textarea{width:100%;border:0;outline:0;resize:none;min-height:30px;max-height:145px;font:inherit;font-size:13px;line-height:1.5;color:var(--text);background:transparent}
 .composer-send{width:34px;height:34px;flex:none;border:0;border-radius:50%;background:var(--accent);color:var(--accent-fg);font-size:17px;cursor:pointer}.composer-send:disabled{opacity:.5;cursor:default}
 .composer-help{font-size:11px;color:var(--text-muted);text-align:center;margin-top:7px}.composer-error{font-size:12px;color:var(--red);max-width:850px;margin:0 auto 7px;display:none}
-@media(max-width:760px){.swarm-toolbar{padding:9px 12px;gap:6px;flex-wrap:wrap}.swarm-run-select{min-width:110px}.swarm-title{display:none}.swarm-status{order:2;margin-left:0}.swarm-button{padding:6px 8px}.swarm-feed{padding:18px 13px}.feed-body{max-width:94%}.swarm-composer{padding:10px 12px}}
+@media(max-width:760px){.swarm-board{padding:0 12px}.board-kind{width:70px}.swarm-toolbar{padding:9px 12px;gap:6px;flex-wrap:wrap}.swarm-run-select{min-width:110px}.swarm-title{display:none}.swarm-status{order:2;margin-left:0}.swarm-button{padding:6px 8px}.swarm-feed{padding:18px 13px}.feed-body{max-width:94%}.swarm-composer{padding:10px 12px}}
 </style></head><body><div class="swarm-app">
 __NAV_HEADER__
 <div class="swarm-toolbar">
@@ -404,6 +411,7 @@ __NAV_HEADER__
   <button id="interrupt-button" class="swarm-button danger" disabled>Прервать</button>
   <button id="clear-button" class="swarm-button" title="Остановить задачу и начать с чистого листа (Cmd+K)">Clear</button>
 </div>
+<details id="board-panel" class="swarm-board" hidden><summary>Доска роя <span id="board-count"></span></summary><div id="board-list" class="board-list"></div></details>
 <main id="feed" class="swarm-feed"><div id="feed-inner" class="feed-inner">
   <div id="empty" class="swarm-empty"><div class="swarm-mark"><img src="__GLYPH_URI__" alt=""></div><h1>Что поручить рою?</h1>
     <p>Опишите результат. Агенты спланируют работу, покажут действия и проверят итог.<br>Вы можете уточнять задачу и управлять выполнением.</p></div>
@@ -432,6 +440,10 @@ function addLog(time,label,detail){
 const agentOf=e=>(e.session||'').split(':').pop()||'агент';
 const secs=e=>e.seconds!=null?' · '+e.seconds+' с':'';
 const ladder=e=>{const p=e.router?.fallback_path||[];return p.length>1?' · перебрано: '+p.join(' → '):''};
+const BOARD_KINDS={fact:'Факт',decision:'Решение',assumption:'Допущение',dead_end:'Тупик'};
+function renderBoard(board){const panel=$('board-panel');if(!board||!board.length){panel.hidden=true;return}
+  panel.hidden=false;$('board-count').textContent='· '+board.length;
+  $('board-list').innerHTML=board.slice().reverse().map(b=>'<div class="board-entry"><span class="board-kind '+escapeHtml(b.kind)+'">'+escapeHtml(BOARD_KINDS[b.kind]||b.kind)+'</span><span class="board-text">'+escapeHtml(b.text)+' <span class="board-author">— '+escapeHtml(b.author||'')+', раунд '+escapeHtml(b.round||'')+'</span></span></div>').join('')}
 function eventView(e){
   const kind=e.event||'';const task=e.task||e.role||'';
   if(kind==='user_task')return addBubble('Вы',e.text,'user');
@@ -445,13 +457,28 @@ function eventView(e){
   if(kind==='llm_response')return addLog(e.time,'Ответ · '+agentOf(e),(e.router?.provider||'')+' / '+(e.router?.model||'')+secs(e)+ladder(e));
   if(kind==='llm_error')return addLog(e.time,'Ошибка · '+agentOf(e),(e.status?e.status+' · ':'')+(e.error||'')+secs(e)+ladder(e));
   if(kind==='invalid_output')return addLog(e.time,'Исправление ответа',e.error||'Неверный формат');
-  if(kind==='autonomous_finish')return addLog(e.time,'Завершено автономно',e.reason||'');
+  if(kind==='collective')return addLog(e.time,'Коллектив · '+(e.role||''),(e.size||0)+' из '+(e.width||e.size||0)+(e.families?.length?': '+e.families.filter(Boolean).join(', '):'')+(e.reason?' · сузился: '+e.reason:''));
+  if(kind==='collective_narrowed')return;
+  if(kind==='review_panel')return addBubble('Комиссия проверки · '+(e.passed?'прошло':'не прошло'),(e.votes||[]).map(v=>(v.passed?'✓ ':'✗ ')+(v.family||'модель')+(v.findings?.length?': '+v.findings.join('; '):'')).join('\n')+(e.confirmed?.length?'\nПодтверждено ≥2: '+e.confirmed.join('; '):''),'monitor');
+  if(kind==='proposals_judged')return addBubble('Судья · '+(e.subject==='plan'?'план':'итог'),'Варианты от: '+(e.families||[]).map(f=>f||'модель').join(', ')+'\n'+(e.merged?'Решение: объединить сильные стороны':'Выбран вариант №'+((e.chosen||0)+1))+(e.judge_family?' · судья: '+e.judge_family:'')+(e.critiques||[]).map(c=>'\n№'+(c.proposal+1)+': + '+(c.strengths||[]).join('; ')+(c.flaws?.length?' / − '+c.flaws.join('; '):'')).join(''),'monitor');
+  if(kind==='judge_failed')return addLog(e.time,'Судья недоступен',(e.error||'')+' · взят первый вариант');
+  if(kind==='debate')return e.contradictions?.length?addBubble('Спор · раунд '+e.round,'Противоречия:\n'+e.contradictions.map(c=>'- '+c).join('\n'),'monitor'):addLog(e.time,'Спор · раунд '+e.round,'противоречий нет');
+  if(kind==='debate_speaker_failed')return addLog(e.time,'Спор · пропущен',e.task+' · '+(e.error||''));
+  if(kind==='board_post')return addLog(e.time,'Доска · '+(BOARD_KINDS[e.entry_kind]||e.entry_kind),e.text+' — '+(e.author||''));
+  if(kind==='lesson_saved')return addLog(e.time,'Память',(e.passed?'урок успеха':'урок неудачи')+' сохранён'+(e.dead_ends?' · тупиков: '+e.dead_ends:''));
+  if(kind==='autonomous_finish')return addLog(e.time,e.delivered===false?'Завершено без результата':'Завершено автономно',e.reason||'');
+  if(kind==='model_call_failed')return addLog(e.time,'Повтор · '+(e.role||''),'попытка '+e.failure+' · '+(e.error||''));
+  if(kind==='router_unreachable')return addLog(e.time,'Роутер недоступен',(e.role||'')+' · ждём '+e.next_try_s+' с (прошло '+e.waited+' с)');
+  if(kind==='waiting_for_models')return addLog(e.time,'Нет живых моделей','пауза '+e.seconds+' с, затем тот же шаг снова · '+(e.reason||''));
   if(kind==='run_stopped')return addLog(e.time,'Статус',(e.status||'')+(e.error?' · '+e.error:''));
   if(kind==='paused'||kind==='resumed'||kind==='replan'||kind==='interrupt_requested'||kind==='pause_requested'||kind==='resume_requested')return addLog(e.time,'Управление',kind+(e.reason?' · '+e.reason:''));
 }
 async function api(path,options={}){const response=await fetch(path,options);let data=await response.json();if(!response.ok)throw new Error(data.detail||'Ошибка запроса');return data}
 function setStatus(s){currentStatus=s.status;const labels={starting:'Запуск',running:'Работает',paused:'Пауза',interrupted:'Прерван',completed:'Завершён',failed:'Ошибка',needs_attention:'Нужно уточнение',budget_exhausted:'Лимит достигнут'};
-  $('run-status').innerHTML='<span class="status-dot '+escapeHtml(s.status)+'"></span><span>'+escapeHtml(labels[s.status]||s.status)+' · '+escapeHtml(s.phase||'')+' · вызовов '+escapeHtml(s.calls||0)+'</span>';
+  const c=s.collective;const coll=c?' · коллектив '+c.size+'/'+c.width:'';
+  const collTitle=c?('Последний коллектив: '+c.role+' — '+(c.families||[]).filter(Boolean).join(', ')+(c.reason?'\nСузился: '+c.reason:'')):'';
+  $('run-status').innerHTML='<span class="status-dot '+escapeHtml(s.status)+'"></span><span title="'+escapeHtml(collTitle)+'">'+escapeHtml(labels[s.status]||s.status)+' · '+escapeHtml(s.phase||'')+' · вызовов '+escapeHtml(s.calls||0)+escapeHtml(coll)+'</span>';
+  renderBoard(s.board);
   $('pause-button').disabled=!s.running||s.paused;$('resume-button').disabled=!(s.paused||['interrupted','failed','needs_attention'].includes(s.status));$('interrupt-button').disabled=!s.running;
   if(s.status==='completed'&&s.draft&&finalRound!==s.round){finalRound=s.round;addBubble('Итог роя',s.draft,'result')}
   if(['failed','needs_attention','budget_exhausted'].includes(s.status)&&s.error)showError(s.error);
@@ -462,7 +489,7 @@ async function refreshRuns(){const data=await api('/v1/swarm/runs');const select
   if(!initialized&&!runId&&!newRunMode&&data.runs.length)runId=data.runs[0].id;
   initialized=true;select.value=runId||'';if(runId!==old)resetFeed();
 }
-function resetFeed(){offset=0;finalRound=null;$('feed-inner').innerHTML='<div id="empty" class="swarm-empty"><div class="swarm-mark"><img src="__GLYPH_URI__" alt=""></div><h1>Что поручить рою?</h1><p>Опишите результат. Агенты спланируют работу, покажут действия и проверят итог.</p></div>';showError('')}
+function resetFeed(){offset=0;finalRound=null;$('feed-inner').innerHTML='<div id="empty" class="swarm-empty"><div class="swarm-mark"><img src="__GLYPH_URI__" alt=""></div><h1>Что поручить рою?</h1><p>Опишите результат. Агенты спланируют работу, покажут действия и проверят итог.</p></div>';showError('');renderBoard([])}
 async function poll(){if(pollInFlight||!runId)return;pollInFlight=true;try{
   const [status,events]=await Promise.all([api('/v1/swarm/runs/'+runId),api('/v1/swarm/runs/'+runId+'/events?offset='+offset)]);
   for(const e of events.events)eventView(e);offset=events.next_offset;setStatus(status);
