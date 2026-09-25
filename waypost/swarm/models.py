@@ -28,6 +28,8 @@ class SwarmConfig(StrictModel):
     review_panel: bool = True
     proposals: bool = True
     board: bool = True
+    debate: bool = True
+    debate_rounds: int = Field(default=1, ge=1, le=2)
 
 
 class Task(StrictModel):
@@ -130,3 +132,10 @@ class DraftChoice(StrictModel):
     critiques: list[Critique]
     chosen: int = Field(ge=0)
     merged: str | None = None
+
+
+class Rebuttal(StrictModel):
+    """A specialist's read of the others' results: where they contradict
+    each other or this specialist's own findings, and what should change."""
+    contradictions: list[str]
+    corrections: list[str] = Field(default_factory=list)

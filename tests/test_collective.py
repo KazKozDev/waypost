@@ -396,3 +396,57 @@ def test_board_off_adds_nothing(tmp_path):
                                   collective_width=1, board=False)
     assert state["board"] == []  # the plan decision was not posted
     assert '"board": []' in backend.prompts["r1:a"][0]
+
+
+# ----------------------------------------------------------- stage 5: debate
+
+
+TWO = _plan([{"id": "a", "role": "analyst", "instruction": "Count", "depends_on": []},
+             {"id": "b", "role": "auditor", "instruction": "Recount", "depends_on": []}])
+
+
+def _rebut(*items):
+    return {"contradictions": list(items), "corrections": []}
+
+
+def test_contradiction_reaches_the_synthesizer_and_the_board(tmp_path):
+    state, backend, events = _run(tmp_path, {
+        "supervisor": [TWO], "r1:a": [_final("42 rows")], "r1:b": [_final("40 rows")],
+        "r1:debate:a": [_rebut("a says 42 rows, b says 40")], "r1:debate:b": [_rebut()],
+        "review-verdict": [PASS]}, collective_width=1)
+    assert state["status"] == "completed"
+    assert "a says 42 rows, b says 40" in backend.prompts["r1:synthesis"][0]
+    assert any("a says 42 rows" in t for k, t in _board(state) if k == "fact")
+
+
+def test_no_debate_with_a_single_specialist(tmp_path):
+    state, backend, events = _run(tmp_path, {"review-verdict": [PASS]}, collective_width=1)
+    assert not any(":debate:" in c for c in backend.calls)
+
+
+def test_no_second_round_when_nothing_is_claimed(tmp_path):
+    state, backend, events = _run(tmp_path, {
+        "supervisor": [TWO], "r1:a": [_final()], "r1:b": [_final()],
+        "r1:debate:a": [_rebut()], "r1:debate:b": [_rebut()],
+        "review-verdict": [PASS]}, collective_width=1, debate_rounds=2)
+    assert not any(c.endswith("#2") and ":debate:" in c for c in backend.calls)
+
+
+def test_second_round_drops_a_false_alarm(tmp_path):
+    state, backend, events = _run(tmp_path, {
+        "supervisor": [TWO], "r1:a": [_final("42")], "r1:b": [_final("42")],
+        "r1:debate:a": [_rebut("maybe b disagrees")], "r1:debate:b": [_rebut()],
+        "r1:debate:a#2": [_rebut()], "r1:debate:b#2": [_rebut()],
+        "review-verdict": [PASS]}, collective_width=1, debate_rounds=2)
+    assert state["contradictions"]["1"] == []
+    assert not any("maybe b disagrees" in t for _, t in _board(state))
+
+
+def test_a_failed_speaker_does_not_fail_the_run(tmp_path):
+    state, backend, events = _run(tmp_path, {
+        "supervisor": [TWO], "r1:a": [_final()], "r1:b": [_final()],
+        "r1:debate:b": [_rebut("conflict")],  # debate:a unscripted -> unreachable
+        "review-verdict": [PASS]}, collective_width=1)
+    assert state["status"] == "completed"
+    assert any(e["event"] == "debate_speaker_failed" for e in events)
+    assert state["contradictions"]["1"] == ["[auditor] conflict"]

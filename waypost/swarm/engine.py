@@ -11,7 +11,7 @@ from typing import Callable
 from pydantic import ValidationError
 
 from .llm import Budget, BudgetExceeded, RunInterrupted, SwarmsBackend, parse_json
-from .models import (Action, DraftChoice, Plan, PlanChoice, ProgressDecision, Review,
+from .models import (Action, DraftChoice, Plan, PlanChoice, ProgressDecision, Rebuttal, Review,
                      ReviewConsensus, SwarmConfig)
 from .store import RunStore
 from .tools import WorkspaceTools
@@ -28,6 +28,9 @@ Return ONLY a JSON object matching the supplied schema, without markdown fences.
 # with the open review findings attached — it never waits on the user.
 AUTONOMOUS_REPLANS = 4
 AUTONOMOUS_FAILED_REVIEWS = 6
+# Debate: at most this many specialists speak, so a wide plan cannot turn
+# the debate into a call storm.
+DEBATE_SPEAKERS = 5
 
 # The shared board: what every agent sees of what the others learned.
 BOARD_KINDS = ("fact", "decision", "assumption", "dead_end")
@@ -176,11 +179,16 @@ class SwarmEngine:
             self._set_plan(plan)
         elif phase == "execute":
             self._execute_graph()
-            self.state["phase"] = "synthesize"
+            self.state["phase"] = "debate" if self.config.debate else "synthesize"
             self._monitor("specialists_finished")
+        elif phase == "debate":
+            self._debate()
+            self.state["phase"] = "synthesize"
         elif phase == "synthesize":
             instruction = ("Produce the final deliverable. Reconcile specialist results, "
-                "inspect artifacts where useful, and disclose gaps. Return the actual answer, not a work plan.")
+                "inspect artifacts where useful, and disclose gaps. Return the actual answer, not a work plan. "
+                "If the context lists contradictions from the specialists' debate, resolve each one explicitly "
+                "— check the artifacts to decide who is right — instead of passing both versions on.")
             width = self.config.collective_width if self.config.proposals else 1
             drafts = self._collective_workers("synthesizer", instruction, self._context(),
                                               f"r{self.state['round']}:synthesis", width)
@@ -243,6 +251,62 @@ class SwarmEngine:
                 heard.append(family)
         self.store.event("collective", role=role, size=len(members), families=[f for _, f in members])
         return members
+
+    def _debate(self):
+        """Specialists read each other's results before anything is
+        assembled, so a contradiction is settled by the synthesizer instead
+        of discovered by the reviewer.
+
+        Round 1: each speaker lists contradictions between the results.
+        Round 2 (debate_rounds=2): each speaker sees all claimed
+        contradictions and keeps only those that still stand — authors can
+        rebut a false alarm. Nothing to debate (one specialist) or nothing
+        found costs no further calls. A speaker that fails is skipped: the
+        debate improves the answer, it must not cost it.
+        """
+        prefix = f"r{self.state['round']}:"
+        plan = Plan.model_validate(self.state["plan"])
+        results = {t.id: self.state["records"].get(prefix + t.id, {}).get("answer", "")
+                   for t in plan.tasks}
+        results = {k: v for k, v in results.items() if v}
+        self.state.setdefault("contradictions", {})
+        if len(results) < 2:
+            return
+        speakers = [t for t in plan.tasks if t.id in results][:DEBATE_SPEAKERS]
+        claimed: list[str] = []
+        for debate_round in range(1, self.config.debate_rounds + 1):
+            found: list[str] = []
+            for task in speakers:
+                others = {k: v[:6000] for k, v in results.items() if k != task.id}
+                context = {"task": self.state["task"], "acceptance": self.state["acceptance"],
+                           "your_role": task.role, "your_result": results[task.id][:6000],
+                           "other_results": others, "board": self._board_view()}
+                if debate_round > 1:
+                    context["claimed_contradictions"] = claimed
+                try:
+                    rebuttal = self._structured(
+                        f"{prefix}debate:{task.id}" + ("" if debate_round == 1 else f"#{debate_round}"),
+                        f"You are the {task.role}. Read the other specialists' results. "
+                        + ("List concrete contradictions between the results (or with your own) and the "
+                           "corrections they imply. Do not list style differences. Empty lists if none."
+                           if debate_round == 1 else
+                           "Of claimed_contradictions, keep only those that still stand after reading all "
+                           "results; drop any your own result already disproves. Empty lists if none."),
+                        json.dumps(context, ensure_ascii=False), Rebuttal)
+                except (ReplanRequested, RunInterrupted, BudgetExceeded):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    self.store.event("debate_speaker_failed", task=task.id,
+                                     error=f"{type(exc).__name__}: {str(exc)[:300]}")
+                    continue
+                found.extend(f"[{task.role}] {c}" for c in rebuttal.contradictions)
+            claimed = found
+            self.store.event("debate", round=debate_round, speakers=len(speakers), contradictions=claimed[:12])
+            if not claimed:
+                break
+        self.state["contradictions"][str(self.state["round"])] = claimed[:12]
+        for item in claimed[:8]:
+            self._post("fact", "Contradiction: " + item, "debate")
 
     def _judge(self, kind, context, proposals, families, schema):
         """An independent judge — from a family none of the authors used —
@@ -483,7 +547,8 @@ class SwarmEngine:
                 "artifacts": {k: self._artifacts_for(k) for k in results},
                 "user_messages": self.state.get("messages", []),
                 "monitor_guidance": self.state.get("monitor_guidance", ""),
-                "board": self._board_view()}
+                "board": self._board_view(),
+                "contradictions": self.state.get("contradictions", {}).get(str(self.state.get("round")), [])}
         if include_draft:
             data["draft"] = self.state["draft"]
         return json.dumps(data, ensure_ascii=False)
