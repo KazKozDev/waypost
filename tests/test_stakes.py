@@ -5,7 +5,6 @@ more than others, that a cheap first attempt is sometimes a tax rather
 than a saving, and that it only ever saw the outcome of the model it
 happened to pick.
 """
-import numpy as np
 import pytest
 
 from waypost.families import model_family
@@ -195,7 +194,11 @@ def test_an_unknown_model_is_its_own_family():
 
 
 @pytest.mark.asyncio
-async def test_a_shadow_records_the_counterfactual(tmp_path):
+@pytest.mark.parametrize("content, response_format, rows", [
+    ('{"answer":42}', {"type": "json_object"}, 1),
+    ("ответ", None, 0),
+])
+async def test_a_shadow_records_the_counterfactual(tmp_path, content, response_format, rows):
     """Everything the router learns is the outcome of the model it chose.
     This is the one place the runner-up gets to answer."""
     import httpx
@@ -214,7 +217,7 @@ async def test_a_shadow_records_the_counterfactual(tmp_path):
             json={
                 "id": "c1", "model": "alt",
                 "choices": [{"index": 0, "finish_reason": "stop",
-                             "message": {"role": "assistant", "content": "ответ"}}],
+                             "message": {"role": "assistant", "content": content}}],
                 "usage": {"prompt_tokens": 5, "completion_tokens": 3,
                           "total_tokens": 8},
             },
@@ -236,8 +239,10 @@ async def test_a_shadow_records_the_counterfactual(tmp_path):
     )
     p = profile()
     p.embedding = [0.3, 0.7]
-    await ex.shadow(Candidate(o, 1.0, {}), req(), p)
-    assert idx.snapshot()["rows"] == 1
+    await ex.shadow(Candidate(o, 1.0, {}), req(response_format=response_format), p)
+    # A counterfactual still needs a quality signal; prose delivery alone
+    # is unknown. Checked shadow evidence is recorded exactly once.
+    assert idx.snapshot()["rows"] == rows
     assert ex.snapshot()["shadows"] == 1
 
 

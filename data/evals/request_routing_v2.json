@@ -1,0 +1,574 @@
+{
+  "description": "Hand-authored RU/EN smoke cases, declared before implementation. Not a production quality benchmark. Tier labels refer to classifier output before safety policy.",
+  "cases": [
+    {
+      "id": "greeting_en",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hello!"
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "chat",
+        "tiers": [
+          "S"
+        ],
+        "language": "en"
+      }
+    },
+    {
+      "id": "greeting_ru",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Привет!"
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "chat",
+        "tiers": [
+          "S"
+        ],
+        "language": "ru"
+      }
+    },
+    {
+      "id": "translate_ru",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Переведи на английский: доброе утро"
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "S"
+        ],
+        "task_subtype": "translation",
+        "language": "en"
+      }
+    },
+    {
+      "id": "translate_code",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Translate this comment into Russian:\n```python\n# Sort the array before returning it.\n```"
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "S"
+        ],
+        "task_subtype": "translation",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "grammar",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Fix the grammar: she go to school every day."
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "S"
+        ],
+        "task_subtype": "rewriting"
+      }
+    },
+    {
+      "id": "generate_python",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Write a Python function that removes duplicate items from a list."
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "code",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "code_generation"
+      }
+    },
+    {
+      "id": "debug_python",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Исправь баг в Python: функция падает с IndexError на пустом списке."
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "code",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "code_debugging",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "explain_code",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Explain why this Python function returns None:\n```python\ndef f(x):\n    x + 1\n```"
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "code",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "code_analysis"
+      }
+    },
+    {
+      "id": "architecture",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Спроектируй распределённую базу данных с репликацией, консенсусом и восстановлением после сбоев."
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "reasoning",
+        "tiers": [
+          "L"
+        ],
+        "task_subtype": "design",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "architecture_en",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Design a distributed database with replication, consensus and recovery after failures."
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "reasoning",
+        "tiers": [
+          "L"
+        ],
+        "task_subtype": "design",
+        "language": "en"
+      }
+    },
+    {
+      "id": "simple_why",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Explain why 2 + 2 = 4."
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "reasoning",
+        "tiers": [
+          "S",
+          "M"
+        ],
+        "language": "en"
+      }
+    },
+    {
+      "id": "new_topic_after_code",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Write a Python sorting algorithm."
+          },
+          {
+            "role": "assistant",
+            "content": "```python\ndef sort(xs):\n    return sorted(xs)\n```"
+          },
+          {
+            "role": "user",
+            "content": "Переведи на английский: сегодня хорошая погода"
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "S"
+        ],
+        "task_subtype": "translation",
+        "language": "en"
+      }
+    },
+    {
+      "id": "greeting_after_system",
+      "request": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\nYou are a Python code debugging assistant. Analyze algorithms and implement functions.\n"
+          },
+          {
+            "role": "user",
+            "content": "Привет!"
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "chat",
+        "tiers": [
+          "S"
+        ],
+        "language": "ru"
+      }
+    },
+    {
+      "id": "request_after_long_system",
+      "request": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\nYou are a helpful assistant. General instructions and background.\n"
+          },
+          {
+            "role": "user",
+            "content": "Напиши Python функцию для вычисления факториала."
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "code",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "code_generation",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "followup_tests",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Напиши Python функцию для разбора CSV."
+          },
+          {
+            "role": "assistant",
+            "content": "```python\ndef parse_csv(text):\n    return text.splitlines()\n```"
+          },
+          {
+            "role": "user",
+            "content": "И добавь тесты для неё."
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "code",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "code_generation",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "followup_ambiguous",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Implement a Python binary search function."
+          },
+          {
+            "role": "assistant",
+            "content": "```python\ndef search(xs, x):\n    return -1\n```"
+          },
+          {
+            "role": "user",
+            "content": "Handle the empty input too."
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "code",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "code_debugging",
+        "language": "en"
+      }
+    },
+    {
+      "id": "shorten_prose",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Describe the water cycle."
+          },
+          {
+            "role": "assistant",
+            "content": "Water evaporates, condenses into clouds and falls as rain."
+          },
+          {
+            "role": "user",
+            "content": "Make it shorter."
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "S",
+          "M"
+        ],
+        "task_subtype": "rewriting",
+        "language": "en"
+      }
+    },
+    {
+      "id": "tool_result",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Исправь баг в Python функции."
+          },
+          {
+            "role": "assistant",
+            "content": null
+          },
+          {
+            "role": "tool",
+            "content": "Traceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\nTraceback: IndexError in function parse.\n"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "run_tests",
+              "description": "Run tests",
+              "parameters": {
+                "type": "object",
+                "properties": {}
+              }
+            }
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "code",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "code_debugging",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "irrelevant_tool_inventory",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hello!"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "python_debug",
+              "description": "Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code Analyze and debug Python code ",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "chat",
+        "tiers": [
+          "S",
+          "M"
+        ],
+        "language": "en"
+      }
+    },
+    {
+      "id": "system_output_language",
+      "request": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Отвечай на русском языке."
+          },
+          {
+            "role": "user",
+            "content": "Explain how rain forms."
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "reasoning",
+        "tiers": [
+          "S",
+          "M"
+        ],
+        "language": "ru"
+      }
+    },
+    {
+      "id": "json_extract",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Extract the year from: the building opened in 1998."
+          }
+        ],
+        "response_format": {
+          "type": "json_schema",
+          "json_schema": {
+            "name": "year",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "year": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "year"
+              ]
+            }
+          }
+        }
+      },
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "S"
+        ],
+        "task_subtype": "extraction",
+        "language": "en"
+      }
+    },
+    {
+      "id": "long_source_tail_instruction",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reference material:\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n```python\ndef f(x):\n    return x + 1\n```\n\nSummarize the reference material in two sentences."
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "summarization",
+        "language": "en"
+      }
+    },
+    {
+      "id": "fresh_task_after_old_russian",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Спроектируй распределённую базу данных."
+          },
+          {
+            "role": "assistant",
+            "content": "Репликация и консенсус..."
+          },
+          {
+            "role": "user",
+            "content": "Extract the number from: order 123."
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "S"
+        ],
+        "task_subtype": "extraction",
+        "language": "en"
+      }
+    },
+    {
+      "id": "vision",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "What is shown in this image?"
+              },
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data:image/png;base64,AAAA"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "task_class": "chat",
+        "tiers": [
+          "S",
+          "M"
+        ],
+        "language": "en"
+      }
+    }
+  ]
+}

@@ -327,33 +327,28 @@ class Router:
         if affinity and self.latency.drifted(o.key):
             affinity = 0.0
 
-        # Quality, in three layers of decreasing generality and
-        # increasing specificity to THIS query. Each one only displaces
-        # the layer under it in proportion to the evidence behind it —
-        # a sharper estimate that is mostly noise is worse than a blunt
-        # one that is true.
-        #
-        #   manifest prior  → what someone wrote down
-        #   predictor       → regression over the embedding, per model
-        #   neighbourhood   → how this model did on similar queries
-        #   bandit          → the running record for this task class
+        # General evidence first, query-specific evidence last. Passing a
+        # contextual prediction as the bandit's prior loses it as soon as
+        # that task/model pair has any observations.
         embedding = getattr(p, "embedding", None)
+        quality = o.quality_for(p.task_class)
+        if self.bandit is not None:
+            if self.stochastic:
+                quality = self.bandit.sample(p.task_class, o.key, quality)
+            else:
+                quality = self.bandit.quality(p.task_class, o.key, quality)
         if self.predictor:
-            base_quality = self.predictor.predict_p_pass(o, p, embedding=embedding)
-        else:
-            base_quality = o.quality_for(p.task_class)
-
+            quality = self.predictor.predict_p_pass(
+                o, p, embedding=embedding, prior=quality, max_trust=0.9
+            )
         if self.neighbors is not None and embedding is not None:
             est = self._neighbor_cache.get(o.key)
             if est is not None:
                 mean, trust = est
-                base_quality = trust * mean + (1.0 - trust) * base_quality
-        if self.bandit is None:
-            quality = base_quality
-        elif self.stochastic:
-            quality = self.bandit.sample(p.task_class, o.key, base_quality)
-        else:
-            quality = self.bandit.quality(p.task_class, o.key, base_quality)
+                # Keep a small contribution from the broader estimate,
+                # including its exploration, even in a dense neighbourhood.
+                trust = min(0.9, trust)
+                quality = trust * mean + (1.0 - trust) * quality
 
         # Code model specialization bonus for code completion profile
         code_bonus = 0.0
@@ -476,7 +471,7 @@ class Router:
         tier = floor or p.tier
         if self.neighbors is None or getattr(p, "embedding", None) is None:
             return tier
-        risk, trust = self.neighbors.escalation_risk(p.embedding)
+        risk, trust = self.neighbors.escalation_risk(p.embedding, embedding_version=p.embedder_version)
         if trust < self.escalation_trust or risk < self.escalation_threshold:
             return tier
         nxt = {Tier.S: Tier.M, Tier.M: Tier.L, Tier.L: Tier.L}[tier]
@@ -488,6 +483,36 @@ class Router:
                 risk * 100,
             )
         return nxt
+
+    def _skip_doomed_first_rungs(self, head: list[Candidate]) -> list[Candidate]:
+        """Start higher when the cheap first rung is likely to fail itself.
+
+        predicted_tier() reads the neighbourhood *average*; this reads the
+        estimate for the specific candidate. A high-trust failure record
+        for this offering means the cheap attempt is a tax — a round trip
+        plus quota spent to learn what the neighbours already say — not a
+        saving. The last rung is never skipped: a weak answer now beats
+        no answer, and with no neighbourhood data nothing is skipped.
+        """
+        while len(head) > 1:
+            first = head[0]
+            if first.offering.is_local:
+                break
+            est = self._neighbor_cache.get(first.offering.key)
+            if est is None:
+                break
+            mean, trust = est
+            if trust < self.escalation_trust:
+                break
+            if mean >= 1.0 - self.escalation_threshold:
+                break
+            log.info(
+                "SKIP %s (similar queries failed %.0f%% of the time)",
+                first.offering.key,
+                (1.0 - mean) * 100,
+            )
+            head = head[1:]
+        return head
 
     def _refresh_neighbors(self, p: RequestProfile) -> None:
         """One neighbourhood lookup per request, shared by every candidate.
@@ -501,7 +526,7 @@ class Router:
         if self.neighbors is None or embedding is None:
             return
         try:
-            self._neighbor_cache = self.neighbors.estimate(embedding)
+            self._neighbor_cache = self.neighbors.estimate(embedding, embedding_version=p.embedder_version)
         except Exception:  # noqa: BLE001 — scoring must not fail on this
             self._neighbor_cache = {}
 
@@ -539,17 +564,20 @@ class Router:
         cloud_cands = _diversify([c for c in cands if not c.offering.is_local])
         local_cands = [c for c in cands if c.offering.is_local]
 
-        # The local model is purely a fallback at the end of the ladder,
-        # unless privacy_only was requested.
+        # The ladder is ordered by expected value (score), not by hosting:
+        # a local model that scores best leads, saving quota and latency.
+        # The one guarantee kept: when a usable local model exists, the
+        # ladder ends with one — the free, always-available last rung.
         if req.profile == "privacy_only":
             head = (local_cands + cloud_cands)[:limit]
-        elif cloud_cands:
-            head = cloud_cands[: max(1, limit - (1 if local_cands else 0))]
-            if local_cands and not any(c.offering.is_local for c in head):
-                head.append(local_cands[0])
         else:
-            head = local_cands[:limit]
-        return head
+            merged = sorted(
+                cloud_cands + local_cands, key=lambda c: c.score, reverse=True
+            )
+            head = merged[:limit]
+            if local_cands and not any(c.offering.is_local for c in head):
+                head = head[: max(0, limit - 1)] + local_cands[:1]
+        return self._skip_doomed_first_rungs(head)
 
     def plan_escalated(
         self, req: ChatRequest, p: RequestProfile, min_tier: Tier, limit: int = 4

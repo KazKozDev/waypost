@@ -393,42 +393,80 @@ class Telemetry:
     def training_rows(
         self, limit: int = 20_000, min_ts: float = 0.0
     ) -> list[dict[str, Any]]:
-        """(embedding, model, reward) triples — the training set.
+        """Attempt quality evidence, with user feedback taking precedence.
 
-        Joined with feedback so a row carries what the user thought, not
-        only what the verifier could prove. Rows without an embedding are
-        useless here and are dropped.
+        Feedback describes the delivered answer, not every earlier failed
+        attempt. Match the offering when known and only its last completed
+        foreground attempt. Explicit ratings outrank inferred reactions.
+        Unknown quality is omitted, never turned into a failure or success.
         """
         with self._conn() as c:
             rows = c.execute(
                 """
+                WITH labeled AS (
                 SELECT a.request_id, a.embedding, a.model, a.provider,
-                       a.tier, a.outcome, a.status, a.ts,
-                       (SELECT AVG(f.reward) FROM feedback f
-                         WHERE f.request_id = a.request_id) AS fb
+                       a.tier, a.outcome, a.status, a.ts, a.outcome_detail,
+                       (SELECT f.rowid FROM feedback f
+                         WHERE f.request_id = a.request_id
+                           AND (f.offering = a.provider || '/' || a.model
+                                OR f.offering = '')
+                           AND a.is_exploration = 0
+                           AND a.rowid = (
+                               SELECT b.rowid FROM attempt_log b
+                                WHERE b.request_id = a.request_id
+                                  AND b.is_final = 1 AND b.is_exploration = 0
+                                  AND (f.offering = '' OR
+                                       b.provider || '/' || b.model = f.offering)
+                                ORDER BY b.ts DESC, b.rowid DESC LIMIT 1)
+                         ORDER BY (f.source = 'explicit') DESC, f.ts DESC,
+                                  f.rowid DESC LIMIT 1) AS fb_id, a.embedder_version
                   FROM attempt_log a
                  WHERE a.embedding IS NOT NULL AND a.is_final = 1 AND a.ts > ?
+                   AND a.provider != 'cache'
                  ORDER BY a.ts DESC LIMIT ?
+                )
+                SELECT labeled.*, f.reward, f.source FROM labeled
+                  LEFT JOIN feedback f ON f.rowid = labeled.fb_id
                 """,
                 (min_ts, limit),
             ).fetchall()
         out: list[dict[str, Any]] = []
-        for req_id, blob, model, provider, tier, outcome, status, ts, fb in rows:
+        for row in rows:
+            (req_id, blob, model, provider, tier, outcome, status, ts,
+             detail, _fb_id, embedder_version, fb_reward, fb_source) = row
             emb = _deserialize_embedding(blob)
             if not emb:
                 continue
-            # The verifier's verdict is the base; explicit and implicit
-            # feedback moves it. Where both exist the average is taken —
-            # they are measuring the same thing from different angles.
-            base = 1.0 if outcome == "pass" and status == "ok" else 0.0
-            reward = base if fb is None else (base + float(fb)) / 2.0
+            details = json.loads(detail or "{}")
+            if fb_reward is not None:
+                reward = float(fb_reward)
+                weight = 1.0 if fb_source == "explicit" else 0.25
+            elif "quality_reward" in details:
+                reward = details["quality_reward"]
+                weight = float(details.get("quality_weight", 0.0))
+            elif (
+                outcome in ("pass", "fail")
+                and not details.get("weak")
+                and not details.get("refusal")
+                and status not in ("rate_limited", "timeout", "upstream_error", "refused")
+            ):
+                # Older logs with concrete verdicts remain usable. Old
+                # generic passes were marked weak and must not seed truth.
+                reward = 1.0 if outcome == "pass" else 0.0
+                weight = 1.0
+            else:
+                continue
+            if reward is None or weight <= 0:
+                continue
             out.append(
                 {
                     "request_id": req_id,
                     "embedding": emb,
                     "offering": f"{provider}/{model}",
                     "tier": tier,
-                    "reward": reward,
+                    "reward": float(reward),
+                    "weight": weight,
+                    "embedder_version": embedder_version or "",
                     "ts": ts,
                 }
             )

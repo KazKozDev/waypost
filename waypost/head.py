@@ -35,7 +35,8 @@ def _onehot(y: np.ndarray, n: int) -> np.ndarray:
 class TaskHead:
     """Pure numpy: no sklearn, no torch. Trains in seconds."""
 
-    def __init__(self, dim: int = 256, classes: list[str] | None = None):
+    def __init__(self, dim: int = 256, classes: list[str] | None = None, *, representation_version: str = ""):
+        self.representation_version = representation_version
         self.dim = dim
         self.classes = classes or TASK_CLASSES
         self.W = np.zeros((len(self.classes), dim))
@@ -90,6 +91,7 @@ class TaskHead:
     def save(self, path: str | Path) -> None:
         data = {
             "dim": self.dim,
+            "representation_version": self.representation_version,
             "classes": self.classes,
             "W": self.W.tolist(),
             "b": self.b.tolist(),
@@ -104,7 +106,7 @@ class TaskHead:
     @classmethod
     def load(cls, path: str | Path) -> "TaskHead":
         data = json.loads(Path(path).read_text())
-        h = cls(dim=data["dim"], classes=data["classes"])
+        h = cls(dim=data["dim"], classes=data["classes"], representation_version=data.get("representation_version", ""))
         h.W = np.array(data["W"])
         h.b = np.array(data["b"])
         h.cw = np.array(data["cw"])

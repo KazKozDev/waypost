@@ -48,7 +48,18 @@ build_iconset() {
   cp /tmp/wp_128.png "$ICONSET/icon_128x128.png";    cp /tmp/wp_256.png "$ICONSET/icon_128x128@2x.png"
   cp /tmp/wp_256.png "$ICONSET/icon_256x256.png";    cp /tmp/wp_512.png "$ICONSET/icon_256x256@2x.png"
   cp /tmp/wp_512.png "$ICONSET/icon_512x512.png";    cp /tmp/wp_1024.png "$ICONSET/icon_512x512@2x.png"
-  iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/icon.icns" && rm -rf "$ICONSET"
+  # iconutil on recent macOS rejects valid sets ("Invalid Iconset") while
+  # the icon source is unchanged — reuse the last good icon instead of
+  # failing the whole build.
+  if iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/icon.icns" 2>/dev/null; then
+    rm -rf "$ICONSET"
+  else
+    echo "⚠ iconutil rejected the iconset; reusing the previous icon.icns"
+    rm -rf "$ICONSET"
+    if [[ -f "/Applications/Waypost.app/Contents/Resources/icon.icns" ]]; then
+      cp "/Applications/Waypost.app/Contents/Resources/icon.icns" "$APP/Contents/Resources/icon.icns"
+    fi
+  fi
 }
 
 if [[ -f macos/icon.png ]]; then

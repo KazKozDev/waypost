@@ -20,6 +20,8 @@ from pathlib import Path
 
 from waypost.config import Settings, load_env
 from waypost.head import TaskHead
+from waypost.request_view import REPRESENTATION_VERSION, build_request_view
+from waypost.schemas import ChatRequest
 
 
 def _encode(texts: list[str]):
@@ -37,7 +39,10 @@ def load_labels(path: str | Path) -> tuple[list[str], list[str], list[float]]:
         if not line.strip():
             continue
         rec = json.loads(line)
-        texts.append(rec["text"])
+        # Request-shaped examples preserve history and tools. Legacy text
+        # labels are treated as a single user request, through the same view.
+        request = rec.get("request") or {"messages": [{"role": "user", "content": rec["text"]}]}
+        texts.append(build_request_view(ChatRequest(**request)).embedding_text)
         tasks.append(rec["task_class"])
         comps.append(float(rec.get("complexity", 0.5)))
     return texts, tasks, comps
@@ -72,7 +77,7 @@ def main() -> None:
         raise SystemExit(f"too few examples ({len(texts)}): need >= 20")
 
     X = _encode(texts)
-    head = TaskHead(dim=X.shape[1])
+    head = TaskHead(dim=X.shape[1], representation_version=REPRESENTATION_VERSION)
     head.train(X, tasks, comps)
     head.save(out)
     print(f"trained on {len(texts)} examples, saved to {out}")

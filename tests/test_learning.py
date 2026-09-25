@@ -235,6 +235,81 @@ def test_training_recovers_a_signal_it_can_learn(db):
     assert payload["models"]["p/A"]["accuracy"] > 0.75
 
 
+def test_training_reports_time_split_and_calibration(db):
+    """A fit is measured on recent rows too, with Brier and calibration."""
+    from scripts.train_predictor import train
+
+    t = Telemetry(db)
+    rng = np.random.default_rng(0)
+    for i in range(300):
+        emb = rng.normal(size=16)
+        good = emb[0] > 0
+        ok = good if rng.random() > 0.1 else not good
+        t.log_attempt_row(
+            AttemptLogEntry(
+                request_id=f"r{i}A", attempt_no=1, ts=time.time() - (300 - i),
+                embedding=list(emb), embedder_version="t", l0_labels={},
+                l1_prediction=None, input_tokens=10, modality="text",
+                image_count=0, audio_duration_s=0.0, vision_token_budget=None,
+                provider="p", backend="cloud", model="A", model_version="",
+                tier="M", thinking_mode=False, routing_source="l0",
+                is_exploration=False, quota_remaining_pct=100.0,
+                quota_window_reset_in_s=0, quota_binding_limit="requests",
+                status="ok" if ok else "error", error_class="", latency_ms=100,
+                ttft_ms=10, output_tokens=5, reasoning_tokens=None,
+                peak_memory_mb=None, is_final=True,
+                outcome="pass" if ok else "fail",
+                outcome_source="hard_check", outcome_detail={},
+            )
+        )
+    payload = train(db, Path(db).parent / "pred.json", verbose=False)
+    entry = payload["models"]["p/A"]
+    assert 0.0 <= entry["time_accuracy"] <= 1.0
+    assert 0.0 <= entry["brier"] <= 1.0
+    assert 0.0 <= entry["time_brier"] <= 1.0
+    assert entry["time_accuracy"] > 0.6  # stable signal holds on recent rows
+    total_n = sum(b["n"] for b in entry["calibration"])
+    assert total_n == max(1, int(300 * 0.25))
+    for b in entry["calibration"]:
+        assert 0.0 <= b["mean_p"] <= 1.0
+        assert 0.0 <= b["empirical"] <= 1.0
+
+
+def test_time_split_catches_drift_the_random_split_hides(db):
+    """The rule flips for recent rows: random accuracy stays high, the
+    time-ordered check must be worse."""
+    from scripts.train_predictor import train
+
+    t = Telemetry(db)
+    rng = np.random.default_rng(0)
+    for i in range(300):
+        emb = rng.normal(size=16)
+        flipped = i >= 225
+        good = (emb[0] <= 0) if flipped else (emb[0] > 0)
+        ok = good if rng.random() > 0.1 else not good
+        t.log_attempt_row(
+            AttemptLogEntry(
+                request_id=f"r{i}A", attempt_no=1, ts=time.time() - (300 - i),
+                embedding=list(emb), embedder_version="t", l0_labels={},
+                l1_prediction=None, input_tokens=10, modality="text",
+                image_count=0, audio_duration_s=0.0, vision_token_budget=None,
+                provider="p", backend="cloud", model="A", model_version="",
+                tier="M", thinking_mode=False, routing_source="l0",
+                is_exploration=False, quota_remaining_pct=100.0,
+                quota_window_reset_in_s=0, quota_binding_limit="requests",
+                status="ok" if ok else "error", error_class="", latency_ms=100,
+                ttft_ms=10, output_tokens=5, reasoning_tokens=None,
+                peak_memory_mb=None, is_final=True,
+                outcome="pass" if ok else "fail",
+                outcome_source="hard_check", outcome_detail={},
+            )
+        )
+    payload = train(db, Path(db).parent / "pred.json", verbose=False)
+    assert "p/A" in payload["models"]
+    entry = payload["models"]["p/A"]
+    assert entry["time_accuracy"] < entry["accuracy"]
+
+
 def test_a_model_with_no_variance_is_skipped(db):
     """Everything passed. A separable fit sends coefficients to infinity
     and manufactures certainty out of an accident."""

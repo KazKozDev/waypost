@@ -513,6 +513,24 @@ score = w_q · quality(task, model)      # bandit over the manifest
 Weights depend on `latency_class`: interactive cares about TTFT, the
 background about saving the quota that interactive will need.
 
+Quality combines the manifest, the task/model bandit, then the query
+predictor and similar attempts, in that order. Contextual evidence is
+weighted by its support; it is no longer discarded when the bandit has
+observations. Each contextual layer retains at least 10% of the broader
+estimate, including its exploration.
+
+Delivery and quality are separate signals. Completing a stream does not
+train quality without content verification. Passing JSON, tool-argument or
+Python syntax checks contributes only 0.25 observations; unchecked prose
+contributes none. Each completed attempt teaches its own offering, so a
+successful escalation does not punish the model that rescued the request.
+Explicit user ratings take precedence over inferred reactions and weak
+checks in training; implicit feedback has weight 0.25. The training set
+omits unknown outcomes and old generic passes marked `weak`. Existing
+bandit state and predictor files are retained; historical bias in those
+artifacts is not retroactively removed by this change.
+
+
 ## Guard and privacy
 
 Injections live not in the user message but in **untrusted blocks**:
