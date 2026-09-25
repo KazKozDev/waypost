@@ -1,0 +1,148 @@
+"""Swarms custom-LLM adapter. No direct provider fallback is configured here."""
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+import uuid
+import httpx
+
+from .models import SwarmConfig
+from .store import RunStore
+
+
+class BudgetExceeded(RuntimeError):
+    pass
+
+
+class Budget:
+    def __init__(self, config: SwarmConfig, state: dict, store: RunStore):
+        self.config, self.state, self.store = config, state, store
+        self.lock = threading.RLock()
+        self.started = time.monotonic()
+        self.previous_seconds = state.get("elapsed_seconds", 0)
+
+    def remaining(self):
+        return self.config.max_seconds - self.previous_seconds - (time.monotonic() - self.started)
+
+    def check(self):
+        if self.remaining() <= 0:
+            raise BudgetExceeded("Execution time budget exhausted")
+
+    def reserve(self):
+        with self.lock:
+            self.check()
+            if self.state["calls"] >= self.config.max_calls:
+                raise BudgetExceeded("LLM call budget exhausted")
+            self.state["calls"] += 1
+            self.checkpoint()
+
+    def checkpoint(self):
+        with self.lock:
+            self.state["elapsed_seconds"] = self.previous_seconds + time.monotonic() - self.started
+            self.store.save(self.state)
+
+
+class WaypostLLM:
+    def __init__(self, config: SwarmConfig, budget: Budget, store: RunStore,
+                 session: str, system: str, client: httpx.Client | None = None):
+        self.config, self.budget, self.store = config, budget, store
+        self.session, self.system, self.client = session, system, client
+        self.last_response: str | None = None
+        self.last_error: Exception | None = None
+
+    def run(self, task: str, **kwargs) -> str:
+        self.last_response = None
+        self.last_error = None
+        try:
+            return self._run(task)
+        except Exception as exc:
+            self.last_error = exc
+            raise
+
+    def _run(self, task: str) -> str:
+        self.budget.reserve()
+        payload = {
+            "model": self.config.model,
+            "messages": [{"role": "system", "content": self.system},
+                         {"role": "user", "content": task}],
+            "max_tokens": self.config.max_tokens, "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+            "stream": False, "session_id": self.session,
+            "latency_class": "batch", "no_cache": True,
+            "idempotency_key": str(uuid.uuid4()),
+        }
+        if self.config.privacy == "strict":
+            payload["privacy"] = "strict"
+        timeout = min(self.config.request_timeout, self.budget.remaining())
+        headers = {"Authorization": "Bearer " + os.getenv("WAYPOST_API_KEY", "unused")}
+        # No implicit HTTP retries: Waypost owns upstream retry/quota accounting.
+        if self.client is not None:
+            response = self.client.post(self.config.base_url.rstrip("/") + "/chat/completions",
+                                        json=payload, headers=headers, timeout=timeout)
+        else:
+            with httpx.Client(trust_env=False) as client:
+                response = client.post(self.config.base_url.rstrip("/") + "/chat/completions",
+                                       json=payload, headers=headers, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        choice = data["choices"][0]
+        if choice.get("finish_reason") == "length":
+            raise ValueError("Waypost response was truncated; increase max_tokens")
+        content = choice["message"].get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("Waypost returned no text")
+        self.store.event("llm_response", session=self.session,
+                         router=data.get("router", {}), usage=data.get("usage", {}))
+        self.last_response = content
+        return content
+
+
+class SwarmsBackend:
+    def __init__(self, config: SwarmConfig, budget: Budget, store: RunStore):
+        # Import only when the optional engine is actually run.
+        os.environ["SWARMS_TELEMETRY_ON"] = "false"
+        os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+        try:
+            from swarms import Agent
+        except ModuleNotFoundError as exc:
+            if exc.name == "swarms":
+                raise RuntimeError("Install the optional engine: pip install -e '.[swarm]'") from exc
+            raise
+        self.agent_class = Agent
+        self.config, self.budget, self.store = config, budget, store
+
+    def ask(self, role: str, system: str, prompt: str) -> str:
+        llm = WaypostLLM(self.config, self.budget, self.store,
+                         f"{self.store.directory.name}:{role}", system)
+        agent = self.agent_class(
+            agent_name=role, system_prompt=system, llm=llm,
+            model_name="openai/auto", max_loops=1, retry_attempts=1,
+            output_type="final", autosave=False, print_on=False,
+            streaming_on=False, dynamic_temperature_enabled=False,
+            context_compression=False, dynamic_context_window=False,
+            reasoning_prompt_on=False,
+        )
+        try:
+            agent.run(prompt)
+        except Exception:
+            if llm.last_error is not None:
+                raise llm.last_error
+            raise
+        # Read the actual adapter response, never an error string swallowed by Agent.
+        if llm.last_error is not None:
+            raise llm.last_error
+        if llm.last_response is None:
+            raise RuntimeError("Swarms did not invoke the Waypost adapter")
+        return llm.last_response
+
+
+def parse_json(text: str) -> dict:
+    text = text.strip()
+    if text.startswith("```") and text.endswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    result = json.loads(text)
+    if not isinstance(result, dict):
+        raise ValueError("Expected one JSON object")
+    return result

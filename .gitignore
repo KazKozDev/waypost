@@ -8,6 +8,7 @@ var/
 .DS_Store
 .pytest_cache/
 .ruff_cache/
+agent_workspace/
 *.egg-info/
 build/
 macos/generated/

@@ -369,6 +369,24 @@ debugging turns into guesswork.
 
 ## CLI
 
+### Autonomous agent swarm (optional)
+
+Swarms agents can now solve multi-step tasks through this router: a supervisor
+builds a dependency graph, specialists execute ready tasks concurrently, and
+an independent reviewer triggers repair rounds. Runs preserve checkpoints,
+artifacts, tool observations and bounded call/step budgets.
+
+```bash
+pip install -e '.[swarm]'
+waypost-swarm run --task 'Design and document a CSV reconciliation library' --run-dir var/swarm/example
+waypost-swarm status var/swarm/example
+waypost-swarm resume var/swarm/example
+```
+
+Start Waypost first. All inference goes through `http://127.0.0.1:8080/v1`
+with `model=auto`. See [the swarm guide](docs/swarm.md) for topology, inputs,
+Python execution, limits and recovery.
+
 ```bash
 waypost                       # start the server
 waypost keys                  # interactively enter all keys
