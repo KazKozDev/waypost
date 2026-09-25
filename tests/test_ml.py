@@ -73,6 +73,33 @@ def test_bandit_survives_restart(db):
     assert revived.quality("code", "p/m") > 0.5
 
 
+def test_stale_bandit_evidence_is_quartered_once(db):
+    """Pre-v2 counts keep their direction at a quarter of the confidence,
+    and the migration never runs twice."""
+    import sqlite3
+
+    b = Bandit(db, decay_per_hour=1.0)
+    for _ in range(12):
+        b.update("code", "p/m", 1.0)
+    b.close()
+    assert b.evidence("code", "p/m") == 12.0
+
+    # Simulate a database written before evidence versioning.
+    conn = sqlite3.connect(db)
+    conn.execute("DELETE FROM bandit_meta WHERE key='evidence_version'")
+    conn.commit()
+    conn.close()
+
+    revived = Bandit(db, decay_per_hour=1.0)
+    assert revived.evidence("code", "p/m") == 3.0
+    assert revived.quality("code", "p/m") == 0.8  # was 13/14, still positive
+    revived.close()
+
+    again = Bandit(db, decay_per_hour=1.0)
+    assert again.evidence("code", "p/m") == 3.0
+    again.close()
+
+
 # ------------------------------------------------------------------- pii
 
 

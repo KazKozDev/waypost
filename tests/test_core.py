@@ -368,7 +368,7 @@ def test_router_targets_local_provider_and_switches(db):
 
 
 def test_router_places_local_model_as_fallback_ladder(db):
-    """Local model is purely a fallback at the end of the ladder when cloud candidates are present."""
+    """The ladder is score-ordered and still ends with a usable local model."""
     cloud_m = offering("groq", "compound", tier=Tier.M, is_local=False, quality_score=0.8)
     cloud_l = offering("nvidia", "nemotron", tier=Tier.L, is_local=False, quality_score=0.9)
     local_qwen = offering("mlx", "mlx-community/Qwen3.6-27B-4bit", tier=Tier.L, is_local=True, quality_score=0.85)
@@ -381,9 +381,111 @@ def test_router_places_local_model_as_fallback_ladder(db):
     plan = r.plan(auto_req, profile, limit=3)
 
     assert len(plan) == 3
-    # Cloud models lead the ladder
-    assert not plan[0].offering.is_local
-    assert not plan[1].offering.is_local
-    # Local Qwen is at the end as fallback
-    assert plan[2].offering.is_local
-    assert plan[2].offering.provider == "mlx"
+    scores = [c.score for c in plan]
+    assert scores == sorted(scores, reverse=True)
+    # The local model rides along in score order, not parked at the end
+    assert any(c.offering.provider == "mlx" for c in plan)
+
+
+def test_weak_local_is_kept_as_last_fallback_rung(db):
+    """A local model that scores worst is still kept as the final rung."""
+    cloud_m = offering("groq", "compound", tier=Tier.M, is_local=False, quality_score=0.8)
+    cloud_l = offering("nvidia", "nemotron", tier=Tier.L, is_local=False, quality_score=0.9)
+    weak_local = offering("mlx", "tiny", tier=Tier.S, is_local=True, quality_score=0.1)
+
+    r, _ = _router([cloud_m, cloud_l, weak_local], db)
+
+    auto_req = req("напиши эссе про квантовую физику")
+    plan = r.plan(auto_req, classify_l0(auto_req), limit=2)
+
+    assert len(plan) == 2
+    assert plan[-1].offering.is_local
+    assert plan[-1].offering.provider == "mlx"
+
+
+def test_doomed_cheap_first_rung_is_skipped(db):
+    """Score says cheap first, but its own track record says fail: start higher."""
+    cheap = offering(
+        "cheap", "small", tier=Tier.S, quality_score=0.95, ttft_p50_ms=50
+    )
+    strong = offering(
+        "good", "big", tier=Tier.M, quality_score=0.7, ttft_p50_ms=2000
+    )
+    local = offering("local", "qwen", tier=Tier.L, is_local=True, quality_score=0.3)
+    r, _ = _router([cheap, strong, local], db)
+
+    rq = req("привет")
+    p = classify_l0(rq)
+    assert p.tier is Tier.S
+    plan = r.plan(rq, p, limit=3)
+    assert plan[0].offering.provider == "cheap"
+
+    # High-trust failure record for this exact offering → skipped.
+    r._neighbor_cache = {plan[0].offering.key: (0.1, 0.9)}
+    skipped = r._skip_doomed_first_rungs(plan)
+    assert [c.offering.provider for c in skipped] == ["good", "local"]
+
+    # Thin evidence → the saving of the cascade is kept, nothing skipped.
+    r._neighbor_cache = {plan[0].offering.key: (0.1, 0.2)}
+    assert r._skip_doomed_first_rungs(plan) == plan
+
+    # The last rung is never skipped: a weak answer beats no answer.
+    assert r._skip_doomed_first_rungs(plan[-1:]) == plan[-1:]
+
+
+def test_similar_failures_skip_the_cheap_attempt_end_to_end(db):
+    """Neighbourhood evidence for the specific candidate moves it out of
+    the first position without raising the floor for everyone."""
+    from waypost.ledger import Ledger
+    from waypost.neighbors import NeighborIndex
+    from waypost.registry import Registry
+
+    cheap = offering(
+        "cheap", "small", tier=Tier.S, quality_score=0.95, ttft_p50_ms=50
+    )
+    strong = offering(
+        "good", "big", tier=Tier.M, quality_score=0.7, ttft_p50_ms=2000
+    )
+    local = offering("local", "qwen", tier=Tier.L, is_local=True, quality_score=0.3)
+    reg = Registry([cheap, strong, local])
+    led = Ledger(db)
+    for o in (cheap, strong, local):
+        led.register(o)
+
+    idx = NeighborIndex()
+    vec = [1.0] * 8
+    for reward in (0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0):
+        idx.add(vec, cheap.key, reward)
+    for _ in range(8):
+        idx.add(vec, strong.key, 1.0)
+
+    from waypost.router import Router
+
+    r = Router(reg, led, CircuitBreaker(), neighbors=idx)
+    rq = req("привет")
+    p = classify_l0(rq)
+    p.embedding = vec
+    plan = r.plan(rq, p, limit=3)
+
+    assert p.tier is Tier.S  # the floor was not raised for everyone
+    assert plan[0].offering.provider == "good"
+    assert any(c.offering.provider == "local" for c in plan)
+
+
+def test_best_scoring_local_leads_the_ladder(db):
+    """A local model that scores best is tried first, not parked at the end."""
+    cloud = offering(
+        "groq", "big", tier=Tier.S, is_local=False,
+        quality_score=0.5, ttft_p50_ms=4000,
+    )
+    local = offering(
+        "ollama", "small", tier=Tier.S, is_local=True,
+        quality_score=0.95, ttft_p50_ms=100,
+    )
+
+    r, _ = _router([cloud, local], db)
+
+    plan = r.plan(req("привет"), classify_l0(req("привет")), limit=2)
+
+    assert plan[0].offering.provider == "ollama"
+    assert plan[0].score >= plan[1].score

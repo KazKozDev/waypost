@@ -9,15 +9,19 @@ A cascade of three levels:
   L2 — a heavy encoder only when L1 confidence is low. An extension
        point, see classify_l2().
 
-The embedding is computed once and reused by three consumers: the
-classifier head, the semantic cache, and the bandit features.
+The routing embedding represents the current task, relevant history and
+constraints. It is shared by the classifier, predictor and neighbourhood.
+The semantic cache uses a separate full-request embedding.
 """
 from __future__ import annotations
 
+import json
 import re
 from functools import lru_cache
 
 from .schemas import Capability, ChatRequest, RequestProfile, Tier
+from .request_view import REPRESENTATION_VERSION, bounded, build_request_view
+from .embeddings import HashingEncoder
 
 CODE_RE = re.compile(r"```|\bdef \b|\bclass \b|=>|;\s*$|</\w+>", re.M)
 MATH_RE = re.compile(r"[∫∑√±≈≤≥]|\\frac|\$\$|\b\d+\s*[\*/\^]\s*\d+")
@@ -109,57 +113,90 @@ def _flatten(req: ChatRequest) -> tuple[str, bool]:
     return "\n".join(parts), has_image
 
 
-def classify_l0(req: ChatRequest) -> RequestProfile:
-    text, has_image = _flatten(req)
-    n_in = estimate_tokens(text)
-    n_out = req.max_tokens or min(2048, max(256, n_in // 2))
+ACTION_PATTERNS = (
+    ("translation", r"\btranslat\w*\b|переведи|перевести"),
+    ("rewriting", r"\brewrite\b|\brephrase\b|\bproofread\b|\bshorten\b|make it shorter|fix the grammar|сократи|перефразируй|исправь (?:грамматику|текст|опечатки)"),
+    ("summarization", r"\bsummari[sz]\w*\b|\bsummary\b|резюмируй|кратко изложи|подведи итог"),
+    ("extraction", r"\bextract\w*\b|\bclassify\b|извлеки|классифицируй"),
+)
+DESIGN_RE = re.compile(r"(?i)\bdesign\b|\barchitect\w*\b|спроектируй|архитектур")
+HARD_REASONING_RE = re.compile(r"(?i)distributed|consensus|replicat|распределён|распределен|консенсус|репликац|\btheorem\b|теорем")
+DEBUG_RE = re.compile(r"(?i)\bdebug\b|\bbug\b|\bfix\b|handle .*input|баг|исправь|почини|ошибк")
+GENERATE_RE = re.compile(r"(?i)\bwrite\b|\bimplement\b|\bcreate\b|\badd\b|напиши|создай|реализуй|добавь")
 
+
+def classify_l0(req: ChatRequest) -> RequestProfile:
+    full_text, has_image = _flatten(req)
+    # Admission still sees the full payload, including schemas and tool-call
+    # arguments. Selecting a smaller routing view must not undercount context.
+    tool_payload = json.dumps(
+        {"tools": req.tools, "functions": req.functions,
+         "response_format": req.response_format,
+         "tool_calls": [m.tool_calls for m in req.messages if m.tool_calls]},
+        ensure_ascii=False,
+    ) if (req.tools or req.functions or req.response_format or any(m.tool_calls for m in req.messages)) else ""
+    n_in = estimate_tokens(full_text) + estimate_tokens(tool_payload)
+    n_out = req.max_tokens or min(2048, max(256, n_in // 2))
     caps: set[Capability] = set()
     if req.tools or req.functions:
         caps.add(Capability.TOOLS)
-    if req.response_format:
+    if (req.response_format or {}).get("type") in ("json_object", "json_schema"):
         caps.add(Capability.JSON)
     if has_image:
         caps.add(Capability.VISION)
     if req.stream:
         caps.add(Capability.STREAM)
 
+    view = build_request_view(req)
+    latest = bounded(view.latest, 2300)
+    text = bounded(view.intent_text, 3200)
     low = text.lower()
     has_code = bool(CODE_RE.search(text)) or any(h in low for h in CODE_HINTS)
-    has_math = bool(MATH_RE.search(text))
+    has_code = has_code or bool(re.search(r"(?i)\btests?\b|тест[ыаов]*\b", text))
+    action = next((name for name, pattern in ACTION_PATTERNS
+                   if re.search(pattern, latest, re.IGNORECASE)), None)
+    design = bool(DESIGN_RE.search(latest))
     reasoning = any(h in low for h in REASONING_HINTS)
-    extraction = any(h in low for h in EXTRACTION_HINTS)
-
-    # Complexity as a continuous value — the tier is derived from it by
-    # thresholds.
-    score = 0.25
-    score += min(0.30, n_in / 12_000)  # length is a signal in itself
-    score += 0.20 if has_code else 0.0
-    score += 0.15 if has_math else 0.0
-    score += 0.15 if reasoning else 0.0
-    score += 0.10 if req.tools else 0.0
-    score -= 0.15 if (extraction and not reasoning and n_in < 800) else 0.0
-    score = max(0.0, min(1.0, score))
-
-    if has_code:
+    has_math = bool(MATH_RE.search(latest))
+    # A translation/summarization of code is a text operation. Conversely,
+    # an elliptical edit of previously requested code remains code work.
+    if action and not (action == "rewriting" and view.continuation and has_code):
+        task, subtype = "extraction", action
+    elif design:
+        task, subtype = "reasoning", "design"
+    elif has_code:
         task = "code"
-    elif reasoning:
-        task = "reasoning"
-    elif extraction:
-        task = "extraction"
+        if DEBUG_RE.search(latest):
+            subtype = "code_debugging"
+        elif GENERATE_RE.search(latest):
+            subtype = "code_generation"
+        else:
+            subtype = "code_analysis"
+    elif reasoning or has_math:
+        task, subtype = "reasoning", "analysis"
     else:
-        task = "chat"
+        task, subtype = "chat", "conversation"
 
+    confidence = 0.8 if action or has_code or design else 0.6
+    if view.continuation:
+        confidence = min(confidence, 0.65)
+    active_tokens = estimate_tokens(view.latest)
+    score = 0.20 + min(0.30, active_tokens / 12_000)
+    score += 0.25 if task == "code" else 0.0
+    score += 0.15 if task == "reasoning" else 0.0
+    score += 0.10 if has_math and task != "extraction" else 0.0
+    score += 0.35 if task == "reasoning" and HARD_REASONING_RE.search(text) else 0.0
+    score += 0.10 if req.tools or req.functions else 0.0
+    score += 0.15 if has_image else 0.0
+    score -= 0.10 if task == "extraction" and active_tokens < 800 else 0.0
+    score = max(0.0, min(1.0, score))
     return RequestProfile(
-        task_probs={task: 0.7, "chat": 0.3} if task != "chat" else {"chat": 1.0},
-        complexity=score,
-        confidence=0.55,
-        tier=tier_from(score, 0.55),
-        required_caps=caps,
-        est_input_tokens=n_in,
-        est_output_tokens=n_out,
-        language="ru" if CYRILLIC_RE.search(text) else "en",
-        classifier_source="rules",
+        task_probs={task: confidence, "chat": 1.0 - confidence} if task != "chat" else {"chat": 1.0},
+        task_subtype=subtype,
+        complexity=score, confidence=confidence, tier=tier_from(score, confidence),
+        required_caps=caps, est_input_tokens=n_in, est_output_tokens=n_out,
+        language=view.language, classifier_source="rules",
+        routing_text=view.embedding_text, representation_version=REPRESENTATION_VERSION,
     )
 
 
@@ -190,23 +227,31 @@ def _static_encoder():
         return None
 
 
+@lru_cache(maxsize=2)
+def routing_encoder(enable_l1: bool = True):
+    encoder = _static_encoder() if enable_l1 else None
+    if encoder is None:
+        encoder = HashingEncoder()
+        name = "hashing:256"
+    else:
+        name = "model2vec:minishlab/potion-multilingual-128M"
+    return encoder, f"{REPRESENTATION_VERSION}|{name}"
+
+
 def classify(
     req: ChatRequest, enable_l1: bool = False, head_path: str | None = None
 ) -> RequestProfile:
     profile = classify_l0(req)
-    if not enable_l1:
+    encoder, version = routing_encoder(enable_l1)
+    profile.embedding = encoder.encode([profile.routing_text])[0]
+    profile.embedder_version = version
+    if not enable_l1 or isinstance(encoder, HashingEncoder):
         return profile
 
-    encoder = _static_encoder()
-    if encoder is None:
-        return profile  # package not installed — silently stay on rules
-
-    text, _ = _flatten(req)
-    profile.embedding = encoder.encode([text[:4000]])[0]
-
     head = _load_head(head_path)
-    if head is None:
-        return profile  # head not trained yet: embedding is there, class is not
+    if (head is None or head.representation_version != REPRESENTATION_VERSION
+            or head.dim != len(profile.embedding)):
+        return profile  # old heads must be retrained on the new request view
 
     probs, complexity, conf = head.predict(profile.embedding)
     profile.task_probs = probs

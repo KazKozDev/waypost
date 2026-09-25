@@ -1,0 +1,959 @@
+{
+  "description": "Hand-authored RU/EN smoke cases, declared before implementation. Not a production quality benchmark. Tier labels refer to classifier output before safety policy.",
+  "limitations": "Hand-authored smoke set, not held-out production traffic. Measures rules and input retention, not answer quality, embedding semantics or provider cost.",
+  "summary": {
+    "before": {
+      "passed": 12,
+      "total": 24,
+      "task_correct": 18,
+      "tier_correct": 15,
+      "language_correct": 20,
+      "latest_head_visible": 22,
+      "latest_tail_visible": 21,
+      "classification_median_ms": 0.0099
+    },
+    "after": {
+      "passed": 24,
+      "total": 24,
+      "task_correct": 24,
+      "tier_correct": 24,
+      "language_correct": 24,
+      "latest_head_visible": 24,
+      "latest_tail_visible": 24,
+      "classification_median_ms": 0.0259
+    }
+  },
+  "cases": [
+    {
+      "id": "greeting_en",
+      "expected": {
+        "task_class": "chat",
+        "tiers": [
+          "S"
+        ],
+        "language": "en"
+      },
+      "before": {
+        "task_class": "chat",
+        "task_subtype": "",
+        "tier": "S",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "chat",
+        "task_subtype": "conversation",
+        "tier": "S",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "greeting_ru",
+      "expected": {
+        "task_class": "chat",
+        "tiers": [
+          "S"
+        ],
+        "language": "ru"
+      },
+      "before": {
+        "task_class": "chat",
+        "task_subtype": "",
+        "tier": "S",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "chat",
+        "task_subtype": "conversation",
+        "tier": "S",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "translate_ru",
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "S"
+        ],
+        "task_subtype": "translation",
+        "language": "en"
+      },
+      "before": {
+        "task_class": "extraction",
+        "task_subtype": "",
+        "tier": "S",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": false
+        },
+        "passed": false,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "extraction",
+        "task_subtype": "translation",
+        "tier": "S",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "translate_code",
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "S"
+        ],
+        "task_subtype": "translation",
+        "language": "ru"
+      },
+      "before": {
+        "task_class": "code",
+        "task_subtype": "",
+        "tier": "M",
+        "language": "en",
+        "matches": {
+          "task": false,
+          "tier": false,
+          "language": false
+        },
+        "passed": false,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "extraction",
+        "task_subtype": "translation",
+        "tier": "S",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "grammar",
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "S"
+        ],
+        "task_subtype": "rewriting"
+      },
+      "before": {
+        "task_class": "extraction",
+        "task_subtype": "",
+        "tier": "S",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "extraction",
+        "task_subtype": "rewriting",
+        "tier": "S",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "generate_python",
+      "expected": {
+        "task_class": "code",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "code_generation"
+      },
+      "before": {
+        "task_class": "code",
+        "task_subtype": "",
+        "tier": "M",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "code",
+        "task_subtype": "code_generation",
+        "tier": "M",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "debug_python",
+      "expected": {
+        "task_class": "code",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "code_debugging",
+        "language": "ru"
+      },
+      "before": {
+        "task_class": "code",
+        "task_subtype": "",
+        "tier": "M",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "code",
+        "task_subtype": "code_debugging",
+        "tier": "M",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "explain_code",
+      "expected": {
+        "task_class": "code",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "code_analysis"
+      },
+      "before": {
+        "task_class": "code",
+        "task_subtype": "",
+        "tier": "L",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": false,
+          "language": true
+        },
+        "passed": false,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "code",
+        "task_subtype": "code_analysis",
+        "tier": "M",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "architecture",
+      "expected": {
+        "task_class": "reasoning",
+        "tiers": [
+          "L"
+        ],
+        "task_subtype": "design",
+        "language": "ru"
+      },
+      "before": {
+        "task_class": "reasoning",
+        "task_subtype": "",
+        "tier": "M",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": false,
+          "language": true
+        },
+        "passed": false,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "reasoning",
+        "task_subtype": "design",
+        "tier": "L",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "architecture_en",
+      "expected": {
+        "task_class": "reasoning",
+        "tiers": [
+          "L"
+        ],
+        "task_subtype": "design",
+        "language": "en"
+      },
+      "before": {
+        "task_class": "reasoning",
+        "task_subtype": "",
+        "tier": "M",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": false,
+          "language": true
+        },
+        "passed": false,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "reasoning",
+        "task_subtype": "design",
+        "tier": "L",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "simple_why",
+      "expected": {
+        "task_class": "reasoning",
+        "tiers": [
+          "S",
+          "M"
+        ],
+        "language": "en"
+      },
+      "before": {
+        "task_class": "reasoning",
+        "task_subtype": "",
+        "tier": "M",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "reasoning",
+        "task_subtype": "analysis",
+        "tier": "M",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "new_topic_after_code",
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "S"
+        ],
+        "task_subtype": "translation",
+        "language": "en"
+      },
+      "before": {
+        "task_class": "code",
+        "task_subtype": "",
+        "tier": "M",
+        "language": "ru",
+        "matches": {
+          "task": false,
+          "tier": false,
+          "language": false
+        },
+        "passed": false,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "extraction",
+        "task_subtype": "translation",
+        "tier": "S",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "greeting_after_system",
+      "expected": {
+        "task_class": "chat",
+        "tiers": [
+          "S"
+        ],
+        "language": "ru"
+      },
+      "before": {
+        "task_class": "code",
+        "task_subtype": "",
+        "tier": "L",
+        "language": "ru",
+        "matches": {
+          "task": false,
+          "tier": false,
+          "language": true
+        },
+        "passed": false,
+        "latest_head_visible": false,
+        "latest_tail_visible": false
+      },
+      "after": {
+        "task_class": "chat",
+        "task_subtype": "conversation",
+        "tier": "S",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "request_after_long_system",
+      "expected": {
+        "task_class": "code",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "code_generation",
+        "language": "ru"
+      },
+      "before": {
+        "task_class": "code",
+        "task_subtype": "",
+        "tier": "L",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": false,
+          "language": true
+        },
+        "passed": false,
+        "latest_head_visible": false,
+        "latest_tail_visible": false
+      },
+      "after": {
+        "task_class": "code",
+        "task_subtype": "code_generation",
+        "tier": "M",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "followup_tests",
+      "expected": {
+        "task_class": "code",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "code_generation",
+        "language": "ru"
+      },
+      "before": {
+        "task_class": "code",
+        "task_subtype": "",
+        "tier": "M",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "code",
+        "task_subtype": "code_generation",
+        "tier": "M",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "followup_ambiguous",
+      "expected": {
+        "task_class": "code",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "code_debugging",
+        "language": "en"
+      },
+      "before": {
+        "task_class": "code",
+        "task_subtype": "",
+        "tier": "M",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "code",
+        "task_subtype": "code_debugging",
+        "tier": "M",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "shorten_prose",
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "S",
+          "M"
+        ],
+        "task_subtype": "rewriting",
+        "language": "en"
+      },
+      "before": {
+        "task_class": "chat",
+        "task_subtype": "",
+        "tier": "S",
+        "language": "en",
+        "matches": {
+          "task": false,
+          "tier": true,
+          "language": true
+        },
+        "passed": false,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "extraction",
+        "task_subtype": "rewriting",
+        "tier": "S",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "tool_result",
+      "expected": {
+        "task_class": "code",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "code_debugging",
+        "language": "ru"
+      },
+      "before": {
+        "task_class": "code",
+        "task_subtype": "",
+        "tier": "L",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": false,
+          "language": true
+        },
+        "passed": false,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "code",
+        "task_subtype": "code_debugging",
+        "tier": "M",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "irrelevant_tool_inventory",
+      "expected": {
+        "task_class": "chat",
+        "tiers": [
+          "S",
+          "M"
+        ],
+        "language": "en"
+      },
+      "before": {
+        "task_class": "chat",
+        "task_subtype": "",
+        "tier": "M",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "chat",
+        "task_subtype": "conversation",
+        "tier": "M",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "system_output_language",
+      "expected": {
+        "task_class": "reasoning",
+        "tiers": [
+          "S",
+          "M"
+        ],
+        "language": "ru"
+      },
+      "before": {
+        "task_class": "reasoning",
+        "task_subtype": "",
+        "tier": "M",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "reasoning",
+        "task_subtype": "analysis",
+        "tier": "M",
+        "language": "ru",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "json_extract",
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "S"
+        ],
+        "task_subtype": "extraction",
+        "language": "en"
+      },
+      "before": {
+        "task_class": "extraction",
+        "task_subtype": "",
+        "tier": "S",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "extraction",
+        "task_subtype": "extraction",
+        "tier": "S",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "long_source_tail_instruction",
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "M"
+        ],
+        "task_subtype": "summarization",
+        "language": "en"
+      },
+      "before": {
+        "task_class": "code",
+        "task_subtype": "",
+        "tier": "M",
+        "language": "en",
+        "matches": {
+          "task": false,
+          "tier": true,
+          "language": true
+        },
+        "passed": false,
+        "latest_head_visible": true,
+        "latest_tail_visible": false
+      },
+      "after": {
+        "task_class": "extraction",
+        "task_subtype": "summarization",
+        "tier": "M",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "fresh_task_after_old_russian",
+      "expected": {
+        "task_class": "extraction",
+        "tiers": [
+          "S"
+        ],
+        "task_subtype": "extraction",
+        "language": "en"
+      },
+      "before": {
+        "task_class": "reasoning",
+        "task_subtype": "",
+        "tier": "M",
+        "language": "ru",
+        "matches": {
+          "task": false,
+          "tier": false,
+          "language": false
+        },
+        "passed": false,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "extraction",
+        "task_subtype": "extraction",
+        "tier": "S",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    },
+    {
+      "id": "vision",
+      "expected": {
+        "task_class": "chat",
+        "tiers": [
+          "S",
+          "M"
+        ],
+        "language": "en"
+      },
+      "before": {
+        "task_class": "chat",
+        "task_subtype": "",
+        "tier": "S",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      },
+      "after": {
+        "task_class": "chat",
+        "task_subtype": "conversation",
+        "tier": "M",
+        "language": "en",
+        "matches": {
+          "task": true,
+          "tier": true,
+          "language": true
+        },
+        "passed": true,
+        "latest_head_visible": true,
+        "latest_tail_visible": true
+      }
+    }
+  ]
+}

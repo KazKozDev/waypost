@@ -168,3 +168,54 @@ def test_cascade_falls_back_when_upstream_returns_no_choices(monkeypatch):
         }).json()
     assert response["choices"][0]["message"]["content"] == "42"
     assert response["router"]["provider"] == "good"
+
+
+def test_http_cascade_records_each_model_and_accepts_negative_feedback(monkeypatch):
+    import waypost.server as srv
+
+    for option in ("ENSEMBLE", "SHADOW", "HEDGING", "SEMANTIC_CACHE", "L1_CLASSIFIER"):
+        monkeypatch.setenv(f"ROUTER_ENABLE_{option}", "false")
+    monkeypatch.setenv("ROUTER_STOCHASTIC_ROUTING", "false")
+    original_classify = srv.classify
+
+    def classify_with_embedding(*args, **kwargs):
+        profile = original_classify(*args, **kwargs)
+        profile.embedding = [1.0, 0.0]
+        return profile
+
+    monkeypatch.setattr(srv, "classify", classify_with_embedding)
+
+    def handler(request):
+        content = "invalid JSON" if request.url.host == "a" else '{"n":42}'
+        return httpx.Response(200, json={
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {
+                "role": "assistant", "content": content,
+            }}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        })
+
+    with _make_client(monkeypatch, handler) as client:
+        response = client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "extract the number 42"}],
+            "session_id": "quality-session", "model": "small",
+            "response_format": {"type": "json_object"},
+        })
+        assert response.status_code == 200
+        result = response.json()
+        assert result["router"]["escalated"] is True, result["router"]
+        assert result["router"]["provider"] == "good"
+        assert result["choices"][0]["message"]["content"] == '{"n":42}'
+        # The facade must not add a third, negative row for the rescue model.
+        assert srv.app.state.neighbors.snapshot()["rows"] == 2
+        rows = {r["offering"]: r for r in srv.app.state.telemetry.training_rows()}
+        assert rows["cheap/small"]["reward"] == 0.
+        assert rows["good/big"]["reward"] == 1.
+        assert rows["good/big"]["weight"] == .25
+        rated = client.post("/v1/feedback", json={
+            "request_id": result["router"]["request_id"],
+            "session_id": "quality-session", "rating": "bad",
+        })
+        assert rated.json()["applied_to_offering"] is True
+        rows = {r["offering"]: r for r in srv.app.state.telemetry.training_rows()}
+        assert rows["good/big"]["reward"] == 0.
+        assert rows["good/big"]["weight"] == 1.

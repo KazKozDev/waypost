@@ -98,6 +98,8 @@ class RouterMeta(BaseModel):
     task_class: str | None = None
     complexity_tier: str | None = None
     classifier_source: str | None = None
+    task_subtype: str | None = None
+    representation_version: str | None = None
     cache: Literal["miss", "exact", "semantic", "semantic_degraded"] = "miss"
     attempts: int = 0
     fallback_path: list[str] = Field(default_factory=list)
@@ -179,7 +181,11 @@ class RequestProfile(BaseModel):
     est_output_tokens: int = 0
     language: str = "unknown"
     classifier_source: Literal["rules", "L1", "L2"] = "rules"
-    embedding: Any | None = None  # reused by the cache and the bandit
+    task_subtype: str = ""
+    routing_text: str = Field(default="", exclude=True, repr=False)
+    representation_version: str = ""
+    embedder_version: str = ""
+    embedding: Any | None = None  # routing only; semantic cache is separate
 
     @property
     def task_class(self) -> str:
