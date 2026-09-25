@@ -152,3 +152,19 @@ def test_cascade_escalates_on_bad_cheap_response(monkeypatch):
     # Empty answer from the cheap model → escalation to a higher tier
     assert r["choices"][0]["message"]["content"] == "42"
     assert r["router"]["provider"] == "good"
+
+
+def test_cascade_falls_back_when_upstream_returns_no_choices(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = f"{request.url.host}:{request.url.port}"
+        if host == "a:1":
+            return httpx.Response(200, json={"choices": [], "usage": {"total_tokens": 1}})
+        return httpx.Response(200, json={"choices": [{"index": 0, "finish_reason": "stop",
+            "message": {"role": "assistant", "content": "42"}}]})
+
+    with _make_client(monkeypatch, handler) as client:
+        response = client.post("/v1/chat/completions", json={
+            "model": "auto", "messages": [{"role": "user", "content": "извлеки число"}],
+        }).json()
+    assert response["choices"][0]["message"]["content"] == "42"
+    assert response["router"]["provider"] == "good"

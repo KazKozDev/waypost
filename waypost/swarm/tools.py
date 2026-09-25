@@ -52,7 +52,12 @@ class WorkspaceTools:
             return json.dumps({"content": text[offset:offset + 20000], "total_chars": len(text),
                                "offset": offset}, ensure_ascii=False)
         if name == "write_file":
-            path = (self.output / arguments["path"]).resolve()
+            requested = Path(arguments["path"])
+            prefix = self.output.relative_to(self.root)
+            # Agents sometimes echo the advertised workspace-relative output
+            # directory. Accept that spelling as well as a bare filename.
+            base = self.root if requested.parts[:len(prefix.parts)] == prefix.parts else self.output
+            path = (base / requested).resolve()
             if not path.is_relative_to(self.output):
                 raise ValueError("Writes must stay inside your output directory")
             content = arguments["content"]

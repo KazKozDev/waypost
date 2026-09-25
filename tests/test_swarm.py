@@ -109,6 +109,24 @@ def test_parallel_dependencies(tmp_path):
     assert SwarmEngine(tmp_path, backend_factory=backend.factory).run("Task")["status"] == "completed"
 
 
+def test_downstream_agent_receives_dependency_file_path(tmp_path):
+    tasks = [
+        {"id": "write", "role": "writer", "instruction": "Write", "depends_on": []},
+        {"id": "check", "role": "checker", "instruction": "Read writer file", "depends_on": ["write"]},
+    ]
+    backend = script(**{"supervisor": [plan(tasks)], "r1:write": [
+        {"kind": "tool", "tool": "write_file", "arguments": {"path": "CHECKLIST.md", "content": "five checks"}},
+        final("written")], "r1:check": [final("checked")]})
+    original = backend.ask
+    def ask(role, system, prompt):
+        if role == "r1:check":
+            assert "artifacts/r1/write/CHECKLIST.md" in prompt
+            assert "Do not recreate a file just to inspect it" in system
+        return original(role, system, prompt)
+    backend.ask = ask
+    assert SwarmEngine(tmp_path, backend_factory=backend.factory).run("Task")["status"] == "completed"
+
+
 def test_malformed_plan_repaired(tmp_path):
     backend = script(**{"supervisor": ["not json", plan()]})
     assert SwarmEngine(tmp_path, backend_factory=backend.factory).run("Task")["status"] == "completed"
@@ -130,6 +148,14 @@ def test_workspace_escape_and_python_opt_in(tmp_path):
     (tools.root / "link").symlink_to(tmp_path)
     with pytest.raises(ValueError):
         tools.execute("read_file", {"path": "link/secret"})
+
+
+def test_write_accepts_advertised_workspace_relative_output_path(tmp_path):
+    tools = WorkspaceTools(tmp_path, "artifacts/r1/writer")
+    result = json.loads(tools.execute("write_file", {
+        "path": "artifacts/r1/writer/CHECKLIST.md", "content": "done"}))
+    assert result["written"] == "artifacts/r1/writer/CHECKLIST.md"
+    assert "done" in tools.execute("read_file", {"path": result["written"]})
 
 
 def test_python_result_and_timeout(tmp_path):
@@ -155,6 +181,25 @@ def test_waypost_adapter_contract(tmp_path):
     assert state["calls"] == 1
 
 
+def test_waypost_adapter_accepts_swarms_messages_and_rejects_empty_choices(tmp_path):
+    store = RunStore(tmp_path)
+    state = {"calls": 0}
+    budget = Budget(SwarmConfig(), state, store)
+    requests = []
+    def handler(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        return httpx.Response(200, json={"choices": []})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        llm = WaypostLLM(SwarmConfig(), budget, store, "run:worker", "system", client)
+        with pytest.raises(ValueError, match="no choices"):
+            llm.run(task=None, messages=[{"role": "user", "content": "the task"}])
+    assert requests[0]["messages"] == [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "the task"},
+    ]
+
+
 def test_real_swarms_uses_custom_adapter(tmp_path, monkeypatch):
     monkeypatch.setenv("SWARMS_TELEMETRY_ON", "false")
     pytest.importorskip("swarms")
@@ -170,6 +215,8 @@ def test_real_swarms_uses_custom_adapter(tmp_path, monkeypatch):
     backend = SwarmsBackend(config, budget, store)
     assert backend.ask("test", "Only JSON", "test task") == '{"ok":true}'
     assert len(calls) == 1 and calls[0]["model"] == "auto"
+    assert any(message["role"] == "user" and "test task" in message["content"]
+               for message in calls[0]["messages"])
 
 
 def test_reviewer_cannot_write(tmp_path):

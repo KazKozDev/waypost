@@ -128,8 +128,11 @@ class SwarmEngine:
                     raise ValueError("Too many tasks for configured max_tasks")
                 return value
             except (ValueError, ValidationError) as exc:
-                self.store.event("invalid_output", role=role, attempt=attempt + 1)
-                prompt = context + "\nYour previous output was invalid. Correct it.\nERROR: " + str(exc)[:2000]
+                self.store.event("invalid_output", role=role, attempt=attempt + 1,
+                                 error=str(exc)[:2000], output=raw[:2000])
+                prompt = (context + "\nYour previous output was invalid. Correct it."
+                          + "\nPREVIOUS OUTPUT:\n" + raw[:8000]
+                          + "\nERROR: " + str(exc)[:2000])
         raise ValueError(f"{role} failed to produce a valid {schema.__name__} after 3 attempts")
 
     def _set_plan(self, plan: Plan):
@@ -142,10 +145,18 @@ class SwarmEngine:
                    if value.get("status") == "done"}
         # Bounded context; full answers remain in the checkpoint and output files.
         data = {"task": self.state["task"], "original_acceptance": self.state["acceptance"],
-                "results": {k: v[:8000] for k, v in results.items()}}
+                "results": {k: v[:8000] for k, v in results.items()},
+                "artifacts": {k: self._artifacts_for(k) for k in results}}
         if include_draft:
             data["draft"] = self.state["draft"]
         return json.dumps(data, ensure_ascii=False)
+
+    def _artifacts_for(self, key: str) -> list[str]:
+        directory = self.store.workspace / "artifacts" / key.replace(":", "/")
+        if not directory.is_dir():
+            return []
+        return [str(path.relative_to(self.store.workspace)) for path in sorted(directory.rglob("*"))
+                if path.is_file()]
 
     def _execute_graph(self):
         plan = Plan.model_validate(self.state["plan"])
@@ -160,6 +171,7 @@ class SwarmEngine:
                 for task in ready:
                     context = {"task": self.state["task"], "acceptance": self.state["acceptance"],
                                "dependencies": {dep: self.state["records"][prefix + dep]["answer"] for dep in task.depends_on},
+                               "dependency_artifacts": {dep: self._artifacts_for(prefix + dep) for dep in task.depends_on},
                                "previous_draft": self.state.get("draft", "")}
                     futures[pool.submit(self._worker, task.role, task.instruction,
                                         json.dumps(context, ensure_ascii=False), prefix + task.id)] = task.id
@@ -181,6 +193,9 @@ class SwarmEngine:
         tools = WorkspaceTools(self.store.workspace, "artifacts/" + key.replace(":", "/"),
                                self.config.allow_python and not read_only)
         system_instruction = f"Your specialty: {role}.\n" + instruction + "\nTOOLS:\n" + tools.describe(read_only) + "\nUse kind=tool to act or kind=final with answer when finished."
+        system_instruction += ("\nTo inspect a dependency artifact, call read_file with its exact "
+                               "workspace-relative path from dependency_artifacts. "
+                               "Do not recreate a file just to inspect it.")
         if read_only:
             system_instruction += "\nOnly read_file and list_files are allowed."
         while record["steps"] < self.config.max_steps:

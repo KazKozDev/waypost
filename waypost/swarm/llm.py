@@ -52,21 +52,31 @@ class WaypostLLM:
         self.last_response: str | None = None
         self.last_error: Exception | None = None
 
-    def run(self, task: str, **kwargs) -> str:
+    def run(self, task: str | None = None, **kwargs) -> str:
         self.last_response = None
         self.last_error = None
         try:
-            return self._run(task)
+            return self._run(task, kwargs.get("messages"))
         except Exception as exc:
             self.last_error = exc
             raise
 
-    def _run(self, task: str) -> str:
+    def _run(self, task: str | None, messages: list[dict] | None = None) -> str:
+        # Swarms 15 may call custom LLMs with task=None and messages=[...].
+        # Its prompt is in messages; sending None as user content fails Waypost validation.
+        conversation = [{"role": "system", "content": self.system}]
+        if messages:
+            conversation.extend({"role": m["role"], "content": m["content"]}
+                                for m in messages if m.get("role") in {"user", "assistant"}
+                                and isinstance(m.get("content"), str))
+        elif isinstance(task, str):
+            conversation.append({"role": "user", "content": task})
+        if len(conversation) == 1:
+            raise ValueError("Swarms supplied no text prompt")
         self.budget.reserve()
         payload = {
             "model": self.config.model,
-            "messages": [{"role": "system", "content": self.system},
-                         {"role": "user", "content": task}],
+            "messages": conversation,
             "max_tokens": self.config.max_tokens, "temperature": 0.2,
             "response_format": {"type": "json_object"},
             "stream": False, "session_id": self.session,
@@ -87,7 +97,11 @@ class WaypostLLM:
                                        json=payload, headers=headers, timeout=timeout)
         response.raise_for_status()
         data = response.json()
-        choice = data["choices"][0]
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            router = data.get("router", {})
+            raise ValueError(f"Waypost returned no choices (provider={router.get('provider')}, model={router.get('model')})")
+        choice = choices[0]
         if choice.get("finish_reason") == "length":
             raise ValueError("Waypost response was truncated; increase max_tokens")
         content = choice["message"].get("content")
