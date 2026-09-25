@@ -11,6 +11,7 @@ classification, fallback turns into guesswork.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
@@ -97,10 +98,13 @@ def classify_error(
     # (xAI, Cerebras, Groq, some hosts). This is not a request defect
     # but an incompatibility with a specific provider/model — move to
     # the next model, do not stop the ladder.
-    if any(
+    if re.search(r"model ['\"][^'\"]+['\"] not found", low) or any(
         p in low
         for p in (
             "model not found",
+            # Ollama with the model's files gone (external drive unplugged)
+            # or its runner crashed: a 400 about this model, not the request.
+            "model is required",
             "model does not exist",
             "unknown model",
             "invalid model",

@@ -544,7 +544,7 @@ def test_models_back_after_an_outage_continue_the_same_step(tmp_path):
 
 def test_models_that_never_come_back_end_the_run_honestly(tmp_path):
     state, backend, events = _run(tmp_path, {
-        "r1:synthesis": [RuntimeError("502")] * 60, "review-verdict": [PASS]}, collective_width=1)
+        "r1:a": [RuntimeError("502")] * 60, "review-verdict": [PASS]}, collective_width=1)
     assert state["status"] == "failed"
     assert "без результата" in state["error"]
     waits = [e for e in events if e["event"] == "waiting_for_models"]
@@ -597,3 +597,21 @@ def test_cli_run_starts_with_collective_defaults(tmp_path, monkeypatch):
     assert code == 0
     assert seen["config"].concurrency == 3
     assert seen["config"].collective_width == 3 and seen["config"].review_panel
+
+
+def test_outage_before_synthesis_still_hands_over_the_specialists_work(tmp_path):
+    state, backend, events = _run(tmp_path, {
+        "r1:a": [{"kind": "tool", "tool": "write_file",
+                  "arguments": {"path": "snake.py", "content": "print('snake')"}}, _final("snake written")],
+        "r1:synthesis": [RuntimeError("502")] * 60}, collective_width=1)
+    assert state["status"] == "completed"
+    assert "Итоговая сборка и проверка не выполнены" in state["draft"]
+    assert "snake written" in state["draft"] and "artifacts/r1/a/snake.py" in state["draft"]
+    assert "Завершено автономно" in state["draft"]
+
+
+def test_ollama_losing_its_model_switches_instead_of_stopping():
+    from waypost.providers.openai_compat import Verdict, classify_error
+    assert classify_error(400, '{"error":{"message":"model is required"}}').verdict is Verdict.SWITCH
+    assert classify_error(400, '{"error":"model \'qwen3.8:27b-mlx\' not found"}').verdict is Verdict.SWITCH
+    assert classify_error(400, '{"error":"bad field"}').verdict is Verdict.FATAL

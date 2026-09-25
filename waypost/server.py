@@ -541,7 +541,10 @@ async def lifespan(app: FastAPI):
             if o.lifecycle == "shadow" and n >= 50 and rate >= 0.90:
                 if registry.transition(o.key, "active", f"{n} ok at {rate:.0%}"):
                     promoted.append(o.key)
-            elif o.lifecycle == "active" and n >= 20 and rate < 0.80:
+            elif o.lifecycle == "active" and n >= 20 and rate < 0.80 and not o.is_local:
+                # Not the local tail: it is the pool's last resort, and its
+                # availability is tracked by the runtime check — its failures
+                # here were a drive unplugged, not a worse model.
                 if registry.transition(o.key, "shadow", f"success rate {rate:.0%}"):
                     demoted.append(o.key)
         # Out-of-band probes: a half-open provider no plan reaches, an

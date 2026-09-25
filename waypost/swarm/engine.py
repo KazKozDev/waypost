@@ -456,6 +456,17 @@ class SwarmEngine:
             return Review(passed=True, findings=[])
         return Review(passed=False, findings=consensus.confirmed, repair=consensus.repair)
 
+    def _specialist_results(self) -> str:
+        parts = []
+        for key, record in self.state.get("records", {}).items():
+            role = self._role_of(key)
+            if record.get("status") != "done" or role in ("synthesis", "audit"):
+                continue
+            files = self._artifacts_for(key)
+            parts.append(f"## {key}\n{str(record.get('answer', ''))[:4000]}"
+                         + ("\nФайлы: " + ", ".join(files) if files else ""))
+        return "\n\n".join(parts)
+
     def _wait(self, seconds: float):
         """Sleep that still honours pause and interrupt."""
         deadline = time.monotonic() + seconds
@@ -470,9 +481,15 @@ class SwarmEngine:
         all there is nothing to deliver, and calling that completed would
         be a lie: it is a failure, with the reason."""
         if not (self.state.get("draft") or "").strip():
-            self.state.update(status="failed", error="Завершено автономно без результата: " + reason)
-            self.store.event("autonomous_finish", reason=reason, delivered=False)
-            return
+            partial = self._specialist_results()
+            if not partial:
+                self.state.update(status="failed", error="Завершено автономно без результата: " + reason)
+                self.store.event("autonomous_finish", reason=reason, delivered=False)
+                return
+            # The specialists' work is real even when nothing assembled it:
+            # hand it over as it is rather than throw it away.
+            self.state["draft"] = ("Итоговая сборка и проверка не выполнены — ниже результаты "
+                                   "специалистов как есть.\n\n" + partial)
         findings = (self.state["reviews"][-1]["findings"] if self.state["reviews"] else [])
         note = "\n\n---\nЗавершено автономно: " + reason + "."
         if findings:
