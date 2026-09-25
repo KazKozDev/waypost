@@ -42,3 +42,34 @@ class RunStore:
         with self._lock, (self.directory / "events.jsonl").open("a") as handle:
             handle.write(json.dumps({"time": datetime.now(timezone.utc).isoformat(),
                                      "event": kind, **data}, ensure_ascii=False) + "\n")
+
+    def control(self) -> dict:
+        path = self.directory / "control.json"
+        if not path.exists():
+            return {"paused": False, "interrupt": False, "messages": []}
+        return json.loads(path.read_text())
+
+    def update_control(self, *, paused: bool | None = None,
+                       interrupt: bool | None = None, message: str | None = None,
+                       take_messages: bool = False) -> dict:
+        """Exchange control with a running engine across processes."""
+        with (self.directory / "control.lock").open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                value = self.control()
+                taken = list(value.get("messages", [])) if take_messages else []
+                if take_messages:
+                    value["messages"] = []
+                if paused is not None:
+                    value["paused"] = paused
+                if interrupt is not None:
+                    value["interrupt"] = interrupt
+                if message is not None:
+                    value.setdefault("messages", []).append({
+                        "time": datetime.now(timezone.utc).isoformat(), "text": message})
+                tmp = self.directory / "control.json.tmp"
+                tmp.write_text(json.dumps(value, ensure_ascii=False))
+                tmp.replace(self.directory / "control.json")
+                return {**value, "taken_messages": taken}
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)

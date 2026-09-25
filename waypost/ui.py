@@ -349,11 +349,133 @@ def nav_header(active: str = "chat") -> str:
   </a>
   <nav class="nav-links nav-tabs">
     <a href="/chat" class="nav-link nav-tab {'active' if active == 'chat' else ''}">Chat</a>
+    <a href="/swarm" class="nav-link nav-tab {'active' if active == 'swarm' else ''}">Рой</a>
     <a href="/dashboard" class="nav-link nav-tab {'active' if active == 'dashboard' else ''}">Dashboard</a>
     <a href="/providers" class="nav-link nav-tab {'active' if active == 'providers' else ''}">Providers</a>
     <a href="/setup" class="nav-link nav-tab {'active' if active == 'setup' else ''}">Setup</a>
   </nav>
 </header>"""
+
+
+def render_swarm_html() -> str:
+    """Live swarm transcript, progress journal, and run controls."""
+    page = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Waypost — Рой</title><link rel="icon" href="__FAVICON__">
+<style>
+__THEME_CSS__
+html,body{height:100%;overflow:hidden}
+.swarm-app{height:100vh;display:flex;flex-direction:column;background:var(--bg)}
+.swarm-toolbar{display:flex;align-items:center;gap:12px;padding:10px 24px;border-bottom:1px solid var(--border-light);background:var(--card);min-height:52px}
+.swarm-title{font-size:14px;font-weight:700;white-space:nowrap}
+.swarm-run-select{min-width:150px;max-width:300px;flex:1;border:1px solid var(--border);background:var(--card);border-radius:7px;padding:7px 10px;color:var(--text);font:inherit}
+.swarm-status{display:inline-flex;align-items:center;gap:7px;color:var(--text-secondary);font-size:12px;margin-left:auto;white-space:nowrap}
+.status-dot{width:7px;height:7px;border-radius:50%;background:var(--text-muted)}
+.status-dot.running{background:var(--green)}.status-dot.paused{background:var(--amber)}.status-dot.failed,.status-dot.interrupted,.status-dot.needs_attention,.status-dot.budget_exhausted{background:var(--red)}.status-dot.completed{background:var(--green)}
+.swarm-button{border:1px solid var(--border);background:var(--card);color:var(--text);padding:7px 11px;border-radius:7px;font:inherit;font-weight:550;cursor:pointer;white-space:nowrap}
+.swarm-button:hover{background:var(--bg-subtle)}.swarm-button:disabled{opacity:.4;cursor:default}
+.swarm-button.danger{color:var(--red)}
+.swarm-feed{flex:1;overflow:auto;padding:30px 20px 22px}.feed-inner{max-width:850px;margin:0 auto}
+.swarm-empty{text-align:center;color:var(--text-secondary);padding:16vh 20px 0}.swarm-empty h1{font-size:25px;color:var(--text);margin:14px 0 5px}.swarm-empty p{font-size:14px;line-height:1.6}
+.swarm-mark{width:60px;height:60px;margin:auto;display:flex;align-items:center;justify-content:center;background:var(--card);border:1px solid var(--border);border-radius:18px;box-shadow:0 6px 20px rgba(0,0,0,.06)}
+.swarm-mark img{width:42px;height:42px;object-fit:contain}
+.feed-item{display:flex;gap:12px;margin:0 0 18px;align-items:flex-start}.feed-item.user{justify-content:flex-end}.feed-body{max-width:85%;min-width:0}
+.feed-role{font-size:11px;color:var(--text-muted);font-weight:650;margin:0 0 4px}.feed-item.user .feed-role{text-align:right}
+.feed-text{font-size:13px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}.feed-item.user .feed-text{background:var(--bg-subtle);border:1px solid var(--border-light);border-radius:14px;padding:10px 13px}
+.feed-item.monitor .feed-text{border-left:2px solid var(--terracotta);padding:3px 0 3px 12px}
+.feed-item.result .feed-text{border-left:2px solid var(--green);padding:3px 0 3px 12px}
+.feed-log{border-top:1px solid var(--border-light);padding:9px 0;color:var(--text-secondary);font-size:12px;display:flex;gap:12px;align-items:baseline;min-width:0}
+.feed-log .log-time{font-family:var(--font-mono);font-size:10px;color:var(--text-muted);width:58px;flex:none}.feed-log .log-label{font-weight:650;color:var(--text);min-width:110px}.feed-log .log-detail{white-space:pre-wrap;overflow-wrap:anywhere;min-width:0}
+.swarm-composer{padding:12px 20px 15px;background:var(--card);border-top:1px solid var(--border-light)}
+.composer-inner{max-width:850px;margin:auto}.composer-box{display:flex;gap:10px;align-items:flex-end;border:1px solid var(--border);border-radius:12px;background:var(--card);box-shadow:0 2px 7px rgba(0,0,0,.035);padding:9px 9px 9px 14px}
+.composer-box textarea{width:100%;border:0;outline:0;resize:none;min-height:30px;max-height:145px;font:inherit;font-size:13px;line-height:1.5;color:var(--text);background:transparent}
+.composer-send{width:34px;height:34px;flex:none;border:0;border-radius:50%;background:var(--accent);color:var(--accent-fg);font-size:17px;cursor:pointer}.composer-send:disabled{opacity:.5;cursor:default}
+.composer-help{font-size:11px;color:var(--text-muted);text-align:center;margin-top:7px}.composer-error{font-size:12px;color:var(--red);max-width:850px;margin:0 auto 7px;display:none}
+@media(max-width:760px){.swarm-toolbar{padding:9px 12px;gap:6px;flex-wrap:wrap}.swarm-run-select{min-width:110px}.swarm-title{display:none}.swarm-status{order:2;margin-left:0}.swarm-button{padding:6px 8px}.swarm-feed{padding:18px 13px}.feed-body{max-width:94%}.swarm-composer{padding:10px 12px}}
+</style></head><body><div class="swarm-app">
+__NAV_HEADER__
+<div class="swarm-toolbar">
+  <span class="swarm-title">Рой агентов</span>
+  <select id="run-select" class="swarm-run-select" aria-label="Задачи роя"><option value="">Новая задача</option></select>
+  <button id="new-button" class="swarm-button" title="Новая задача">Новая</button>
+  <span id="run-status" class="swarm-status"><span class="status-dot"></span><span>Готов к задаче</span></span>
+  <button id="pause-button" class="swarm-button" disabled>Пауза</button>
+  <button id="resume-button" class="swarm-button" disabled>Продолжить</button>
+  <button id="interrupt-button" class="swarm-button danger" disabled>Прервать</button>
+</div>
+<main id="feed" class="swarm-feed"><div id="feed-inner" class="feed-inner">
+  <div id="empty" class="swarm-empty"><div class="swarm-mark"><img src="__GLYPH_URI__" alt=""></div><h1>Что поручить рою?</h1>
+    <p>Опишите результат. Агенты спланируют работу, покажут действия и проверят итог.<br>Вы можете уточнять задачу и управлять выполнением.</p></div>
+</div></main>
+<div class="swarm-composer"><div id="composer-error" class="composer-error"></div><div class="composer-inner">
+  <div class="composer-box"><textarea id="message" rows="1" placeholder="Задача для роя или уточнение…" aria-label="Сообщение рою"></textarea><button id="send-button" class="composer-send" aria-label="Отправить">↑</button></div>
+  <div class="composer-help">Enter — отправить · Shift+Enter — новая строка · Пауза и продолжение сохраняют ход работы</div>
+</div></div></div>
+<script>
+const $ = id => document.getElementById(id);
+let runId = localStorage.getItem('waypost-swarm-run') || '';
+let offset = 0, busy = false, currentStatus = '', pollInFlight = false, initialized = false, newRunMode = false, finalRound = null;
+const escapeHtml = text => String(text ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+function showError(message){$('composer-error').textContent=message;$('composer-error').style.display=message?'block':'none'}
+function scrollDown(){const feed=$('feed');if(feed.scrollHeight-feed.scrollTop-feed.clientHeight<240)feed.scrollTop=feed.scrollHeight}
+function addBubble(role,text,type='agent'){
+  $('empty').style.display='none';const row=document.createElement('div');row.className='feed-item '+type;
+  row.innerHTML='<div class="feed-body"><div class="feed-role">'+escapeHtml(role)+'</div><div class="feed-text">'+escapeHtml(text)+'</div></div>';
+  $('feed-inner').appendChild(row);scrollDown();
+}
+function addLog(time,label,detail){
+  $('empty').style.display='none';const row=document.createElement('div');row.className='feed-log';
+  row.innerHTML='<span class="log-time">'+escapeHtml((time||'').slice(11,19))+'</span><span class="log-label">'+escapeHtml(label)+'</span><span class="log-detail">'+escapeHtml(detail)+'</span>';
+  $('feed-inner').appendChild(row);scrollDown();
+}
+function eventView(e){
+  const kind=e.event||'';const task=e.task||e.role||'';
+  if(kind==='user_task')return addBubble('Вы',e.text,'user');
+  if(kind==='user_message_queued')return addBubble('Вы · уточнение',e.text,'user');
+  if(kind==='plan')return addBubble('План роя', (e.plan?.tasks||[]).map((t,i)=>(i+1)+'. '+t.role+' — '+t.instruction).join('\n'), 'monitor');
+  if(kind==='progress_assessment')return addBubble('Агент прогресса · '+e.action,e.reason+(e.guidance?'\n'+e.guidance:''),'monitor');
+  if(kind==='task_done')return addLog(e.time,'Завершил: '+task,e.role||'');
+  if(kind==='tool_started')return addLog(e.time,task+' · '+e.tool, e.arguments?.path||e.arguments?.code?.slice(0,100)||'');
+  if(kind==='tool_finished')return addLog(e.time,task+' · результат',e.observation||'');
+  if(kind==='llm_response')return addLog(e.time,'Waypost', (e.router?.provider||'')+' / '+(e.router?.model||''));
+  if(kind==='invalid_output')return addLog(e.time,'Исправление ответа',e.error||'Неверный формат');
+  if(kind==='run_stopped')return addLog(e.time,'Статус',e.status||'');
+  if(kind==='paused'||kind==='resumed'||kind==='replan'||kind==='interrupt_requested'||kind==='pause_requested'||kind==='resume_requested')return addLog(e.time,'Управление',kind+(e.reason?' · '+e.reason:''));
+}
+async function api(path,options={}){const response=await fetch(path,options);let data=await response.json();if(!response.ok)throw new Error(data.detail||'Ошибка запроса');return data}
+function setStatus(s){currentStatus=s.status;const labels={starting:'Запуск',running:'Работает',paused:'Пауза',interrupted:'Прерван',completed:'Завершён',failed:'Ошибка',needs_attention:'Нужно уточнение',budget_exhausted:'Лимит достигнут'};
+  $('run-status').innerHTML='<span class="status-dot '+escapeHtml(s.status)+'"></span><span>'+escapeHtml(labels[s.status]||s.status)+' · '+escapeHtml(s.phase||'')+' · вызовов '+escapeHtml(s.calls||0)+'</span>';
+  $('pause-button').disabled=!s.running||s.paused;$('resume-button').disabled=!(s.paused||['interrupted','failed','needs_attention'].includes(s.status));$('interrupt-button').disabled=!s.running;
+  if(s.status==='completed'&&s.draft&&finalRound!==s.round){finalRound=s.round;addBubble('Итог роя',s.draft,'result')}
+  if(['failed','needs_attention','budget_exhausted'].includes(s.status)&&s.error)showError(s.error);
+  else if(s.status!=='starting')showError('');
+}
+async function refreshRuns(){const data=await api('/v1/swarm/runs');const select=$('run-select');const old=runId;
+  select.innerHTML='<option value="">Новая задача</option>'+data.runs.map(r=>'<option value="'+escapeHtml(r.id)+'">'+escapeHtml((r.task||'').slice(0,65))+'</option>').join('');
+  if(!initialized&&!runId&&!newRunMode&&data.runs.length)runId=data.runs[0].id;
+  initialized=true;select.value=runId||'';if(runId!==old)resetFeed();
+}
+function resetFeed(){offset=0;finalRound=null;$('feed-inner').innerHTML='<div id="empty" class="swarm-empty"><div class="swarm-mark"><img src="__GLYPH_URI__" alt=""></div><h1>Что поручить рою?</h1><p>Опишите результат. Агенты спланируют работу, покажут действия и проверят итог.</p></div>';showError('')}
+async function poll(){if(pollInFlight||!runId)return;pollInFlight=true;try{
+  const [status,events]=await Promise.all([api('/v1/swarm/runs/'+runId),api('/v1/swarm/runs/'+runId+'/events?offset='+offset)]);
+  for(const e of events.events)eventView(e);offset=events.next_offset;setStatus(status);
+}catch(err){showError(err.message)}finally{pollInFlight=false}}
+async function send(){const text=$('message').value.trim();if(!text||busy)return;busy=true;$('send-button').disabled=true;showError('');try{
+  if(!runId){const state=await api('/v1/swarm/runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task:text})});runId=state.id;newRunMode=false;localStorage.setItem('waypost-swarm-run',runId);resetFeed();await refreshRuns()}
+  else await api('/v1/swarm/runs/'+runId+'/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+  $('message').value='';await poll();
+}catch(err){showError(err.message)}finally{busy=false;$('send-button').disabled=false}}
+async function control(action){if(!runId)return;try{await api('/v1/swarm/runs/'+runId+'/'+action,{method:'POST'});await poll()}catch(err){showError(err.message)}}
+$('send-button').onclick=send;$('message').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});
+$('pause-button').onclick=()=>control('pause');$('resume-button').onclick=()=>control('resume');$('interrupt-button').onclick=()=>control('interrupt');
+$('new-button').onclick=()=>{runId='';newRunMode=true;localStorage.removeItem('waypost-swarm-run');$('run-select').value='';resetFeed();$('run-status').innerHTML='<span class="status-dot"></span><span>Готов к задаче</span>';currentStatus='';for(const id of ['pause-button','resume-button','interrupt-button'])$(id).disabled=true;$('message').focus()};
+$('run-select').onchange=e=>{runId=e.target.value;newRunMode=!runId;if(runId)localStorage.setItem('waypost-swarm-run',runId);else localStorage.removeItem('waypost-swarm-run');resetFeed();poll()};
+refreshRuns().then(poll).catch(err=>showError(err.message));setInterval(poll,1500);setInterval(()=>refreshRuns().catch(()=>{}),12000);
+</script></body></html>"""
+    return (page.replace("__THEME_CSS__", theme_css())
+            .replace("__NAV_HEADER__", nav_header("swarm"))
+            .replace("__FAVICON__", FAVICON)
+            .replace("__GLYPH_URI__", _GLYPH_URI))
 
 
 def render_dashboard_html(data: dict[str, Any]) -> str:

@@ -374,7 +374,12 @@ debugging turns into guesswork.
 Swarms agents can now solve multi-step tasks through this router: a supervisor
 builds a dependency graph, specialists execute ready tasks concurrently, and
 an independent reviewer triggers repair rounds. Runs preserve checkpoints,
-artifacts, tool observations and bounded call/step budgets.
+artifacts and tool observations. A progress agent checks for stalled work,
+redirects specialists or replans, and asks for guidance when progress stops.
+Overall call, step and round limits are unset by default.
+
+The **Рой** tab after Chat lets you start a task, read the live agent journal,
+send corrections, pause, interrupt and resume a run.
 
 ```bash
 pip install -e '.[swarm]'
@@ -385,7 +390,7 @@ waypost-swarm resume var/swarm/example
 
 Start Waypost first. All inference goes through `http://127.0.0.1:8080/v1`
 with `model=auto`. See [the swarm guide](docs/swarm.md) for topology, inputs,
-Python execution, limits and recovery.
+Python execution, progress checks and recovery.
 
 ```bash
 waypost                       # start the server

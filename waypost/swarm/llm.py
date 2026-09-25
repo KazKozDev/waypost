@@ -16,6 +16,10 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
+class RunInterrupted(RuntimeError):
+    pass
+
+
 class Budget:
     def __init__(self, config: SwarmConfig, state: dict, store: RunStore):
         self.config, self.state, self.store = config, state, store
@@ -24,16 +28,36 @@ class Budget:
         self.previous_seconds = state.get("elapsed_seconds", 0)
 
     def remaining(self):
+        if self.config.max_seconds is None:
+            return float("inf")
         return self.config.max_seconds - self.previous_seconds - (time.monotonic() - self.started)
 
     def check(self):
+        control = self.store.control()
+        if control.get("interrupt"):
+            raise RunInterrupted("Interrupted by user")
+        if control.get("paused"):
+            with self.lock:
+                if self.state.get("status") != "paused":
+                    self.state["status"] = "paused"
+                    self.checkpoint()
+                    self.store.event("paused")
+            while control.get("paused"):
+                time.sleep(0.2)
+                control = self.store.control()
+                if control.get("interrupt"):
+                    raise RunInterrupted("Interrupted by user")
+            with self.lock:
+                self.state["status"] = "running"
+                self.checkpoint()
+                self.store.event("resumed")
         if self.remaining() <= 0:
             raise BudgetExceeded("Execution time budget exhausted")
 
     def reserve(self):
         with self.lock:
             self.check()
-            if self.state["calls"] >= self.config.max_calls:
+            if self.config.max_calls is not None and self.state["calls"] >= self.config.max_calls:
                 raise BudgetExceeded("LLM call budget exhausted")
             self.state["calls"] += 1
             self.checkpoint()

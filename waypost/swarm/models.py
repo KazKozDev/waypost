@@ -13,13 +13,13 @@ class SwarmConfig(StrictModel):
     model: str = "auto"
     privacy: Literal["normal", "strict"] = "normal"
     concurrency: int = Field(default=2, ge=1, le=16)
-    max_tasks: int = Field(default=12, ge=1, le=50)
-    max_rounds: int = Field(default=3, ge=1, le=10)
-    max_steps: int = Field(default=10, ge=1, le=100)
-    max_calls: int = Field(default=100, ge=1)
+    max_tasks: int | None = Field(default=None, ge=1)
+    max_rounds: int | None = Field(default=None, ge=1)
+    max_steps: int | None = Field(default=None, ge=1)
+    max_calls: int | None = Field(default=None, ge=1)
     max_tokens: int = Field(default=4096, ge=256, le=32768)
     request_timeout: float = Field(default=310, gt=0)
-    max_seconds: float = Field(default=3600, gt=0)
+    max_seconds: float | None = Field(default=None, gt=0)
     allow_python: bool = False
 
 
@@ -31,8 +31,8 @@ class Task(StrictModel):
 
 
 class Plan(StrictModel):
-    acceptance: list[str] = Field(min_length=1, max_length=20)
-    tasks: list[Task] = Field(min_length=1, max_length=50)
+    acceptance: list[str] = Field(min_length=1)
+    tasks: list[Task] = Field(min_length=1)
 
     @model_validator(mode="after")
     def valid_graph(self):
@@ -80,3 +80,9 @@ class Review(StrictModel):
         if self.passed and self.repair is not None:
             raise ValueError("a passing review must not contain a repair plan")
         return self
+
+
+class ProgressDecision(StrictModel):
+    action: Literal["continue", "redirect", "replan", "needs_input"]
+    reason: str = Field(min_length=1)
+    guidance: str = ""

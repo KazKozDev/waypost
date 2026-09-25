@@ -11,13 +11,16 @@ This is an optional module; installing/running the router does not start a swarm
 flowchart TD
     Task[Task and input files] --> Supervisor[Supervisor: dependency graph]
     Supervisor --> Workers[Specialists: concurrent ready tasks]
-    Workers --> Synthesis[Final deliverable]
+    Workers --> Progress[Progress agent: evidence and stagnation]
+    Progress -->|continue| Synthesis[Final deliverable]
+    Progress -->|replan| Supervisor
     Synthesis --> Audit[Independent artifact audit]
     Audit --> Verdict{Acceptance criteria met?}
-    Verdict -->|Yes| Result[Completed result]
-    Verdict -->|No, budget remains| Repair[Repair graph]
+    Verdict --> Progress
+    Progress -->|accepted| Result[Completed result]
+    Verdict -->|No| Repair[Repair graph]
     Repair --> Workers
-    Verdict -->|Round limit| Partial[Needs attention]
+    Progress -->|user guidance needed| Partial[Needs attention]
 ```
 
 The supervisor chooses specialties, instructions, dependencies and acceptance
@@ -25,11 +28,14 @@ criteria for each task. A graph wave executes up to `concurrency` specialists
 at once. Downstream tasks receive dependency answers. Workers can inspect files,
 write deliverables and optionally run Python. The synthesizer produces the answer;
 a separate read-only agent audits it; a verdict agent either accepts it or builds
-a repair graph. Original acceptance criteria survive repair rounds.
+a repair graph. An independent progress agent examines work, artifacts, and
+review findings, and can redirect, replan, or request user guidance. Repeated
+invalid structured output and unchanged failed reviews trigger deterministic
+stagnation checks as well. Original acceptance criteria survive repair rounds.
 
 Swarms supplies the actual `Agent` execution and prompt handling. Waypost's
 engine owns graph scheduling, the structured action/tool loop, validation,
-checkpointing and budgets. It does not use the hosted Swarms API or require a
+checkpointing and optional budgets. It does not use the hosted Swarms API or require a
 Swarms API key. Framework telemetry is disabled before importing Swarms.
 
 ## Install and run
@@ -60,6 +66,13 @@ Use `python -m waypost.swarm` if the console script is not on PATH.
 Waypost must have at least one working upstream or local model. An installed
 router alone does not supply inference.
 
+The Waypost UI has a **Рой** tab immediately after Chat. Enter a task there,
+follow the live agent journal, send corrections as messages, pause, interrupt,
+and resume a saved run. A correction replans from the latest checkpoint; an
+interrupted run also resumes from its checkpoint. UI runs are stored beside the
+router database in `swarm-ui/`. The server environment needs the optional
+`swarm` dependencies installed.
+
 For numerical/data tasks, supply files and optionally allow Python:
 
 ```bash
@@ -82,10 +95,15 @@ The reviewer has only listing/reading tools, even if Python is enabled.
 waypost-swarm run --task-file task.txt \
   --base-url http://127.0.0.1:8080/v1 \
   --model auto --privacy strict --concurrency 1 \
-  --max-tasks 12 --max-rounds 3 --max-steps 10 \
-  --max-calls 100 --max-tokens 4096 --max-seconds 3600 \
+  --max-tokens 4096 \
   --request-timeout 310
 ```
+
+Overall task, round, step, call, and wall-time limits are **unset by default**.
+You can add `--max-tasks`, `--max-rounds`, `--max-steps`, `--max-calls`, or
+`--max-seconds` when a particular run needs an explicit cap. The progress agent
+and stagnation checks govern autonomous continuation; they cannot guarantee
+that every subtle semantic loop will be detected.
 
 - `WAYPOST_BASE_URL` sets the CLI default endpoint.
 - `WAYPOST_API_KEY` is optional, for a protected router deployment; the default
@@ -134,10 +152,10 @@ This records an unknown outcome and asks the agent to inspect before repeating
 work. It does **not** guarantee exactly-once external effects.
 
 `completed` means the model reviewer accepted the result. `needs_attention`
-means repair rounds were exhausted; `budget_exhausted` means a call/step/time
-limit was hit; `failed` and `interrupted` runs can be resumed. Completed and
-budget/review-exhausted runs are terminal. Start a new run with larger limits
-and supply previous deliverables as input if more work is needed. CLI exit code
+means the progress checks need user guidance (or an explicitly configured round
+limit was reached); `budget_exhausted` means an optional call/step/time limit
+was hit. `failed`, `interrupted`, and `needs_attention` runs can be resumed,
+and a correction can reopen a completed run in the UI. CLI exit code
 is 0 for completed runs and 2 otherwise; `status` itself exits 0.
 
 Check the status alongside `result.md`: a draft file alone is not a success flag.

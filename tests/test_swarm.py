@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 
 import httpx
 import pytest
@@ -34,7 +35,11 @@ class Scripted:
         self.budget.reserve()
         with self.lock:
             self.prompts.append((role, prompt))
-            value = self.script[role].pop(0)
+            value = (self.script[role].pop(0) if role in self.script else
+                     {"action": "continue", "reason": "Work is progressing", "guidance": ""}
+                     if role == "progress-monitor" else None)
+            if value is None:
+                raise KeyError(role)
         if isinstance(value, Exception):
             raise value
         return json.dumps(value) if not isinstance(value, str) else value
@@ -62,7 +67,7 @@ def test_completion_and_tool_artifact(tmp_path):
     assert state["status"] == "completed"
     assert (tmp_path / "workspace/artifacts/r1/a/answer.txt").read_text() == "42"
     assert (tmp_path / "result.md").read_text() == "A concrete answer"
-    assert state["calls"] == 6
+    assert state["calls"] == 8
     assert SwarmEngine(tmp_path, backend_factory=backend.factory).run(resume=True) == state
 
 
@@ -132,6 +137,21 @@ def test_malformed_plan_repaired(tmp_path):
     assert SwarmEngine(tmp_path, backend_factory=backend.factory).run("Task")["status"] == "completed"
 
 
+def test_repeated_invalid_review_replans_then_requests_input(tmp_path):
+    invalid = {"passed": False, "findings": ["repair needed"],
+               "repair": plan([{"id": "fix", "role": "fixer", "instruction": "Fix",
+                                "depends_on": ["unknown"]}])}
+    backend = script(**{"supervisor": [plan(), plan()],
+                        "r2:a": [final("retried")], "r2:synthesis": [final("retried")],
+                        "r2:audit": [final("retried")],
+                        "review-verdict": [invalid] * 9})
+    state = SwarmEngine(tmp_path, backend_factory=backend.factory).run("Task")
+    assert state["status"] == "needs_attention"
+    assert state["round"] == 2
+    assert sum(role == "review-verdict" for role, _ in backend.prompts) == 9
+    assert "after replanning" in state["error"]
+
+
 def test_review_limit(tmp_path):
     backend = script(**{"review-verdict": [{"passed": False, "findings": ["missing"], "repair": plan()}]})
     state = SwarmEngine(tmp_path, SwarmConfig(max_rounds=1), backend.factory).run("Task")
@@ -158,6 +178,15 @@ def test_write_accepts_advertised_workspace_relative_output_path(tmp_path):
     assert "done" in tools.execute("read_file", {"path": result["written"]})
 
 
+def test_same_round_agents_cannot_create_duplicate_artifact_path(tmp_path):
+    first = WorkspaceTools(tmp_path, "artifacts/r1/writer")
+    second = WorkspaceTools(tmp_path, "artifacts/r1/reviewer")
+    first.execute("write_file", {"path": "CHECKLIST.md", "content": "original"})
+    with pytest.raises(ValueError, match="read that path"):
+        second.execute("write_file", {"path": "CHECKLIST.md", "content": "duplicate"})
+    assert (tmp_path / "artifacts/r1/writer/CHECKLIST.md").read_text() == "original"
+
+
 def test_python_result_and_timeout(tmp_path):
     tools = WorkspaceTools(tmp_path, "out", allow_python=True)
     assert json.loads(tools.execute("run_python", {"code": "print(6 * 7)"}))["output"].strip() == "42"
@@ -179,6 +208,64 @@ def test_waypost_adapter_contract(tmp_path):
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         assert WaypostLLM(config, budget, store, "run:worker", "system", client).run("task") == "ok"
     assert state["calls"] == 1
+
+
+def test_unlimited_run_can_pause_and_resume(tmp_path):
+    assert SwarmConfig().max_calls is None and SwarmConfig().max_rounds is None
+    backend = script()
+    engine = SwarmEngine(tmp_path, backend_factory=backend.factory)
+    engine.store.update_control(paused=True)
+    result = []
+    thread = threading.Thread(target=lambda: result.append(engine.run("Task")))
+    thread.start()
+    for _ in range(50):
+        if (tmp_path / "state.json").exists() and engine.store.load().get("status") == "paused":
+            break
+        time.sleep(0.02)
+    assert engine.store.load()["status"] == "paused"
+    engine.store.update_control(paused=False)
+    thread.join(timeout=5)
+    assert not thread.is_alive() and result[0]["status"] == "completed"
+
+
+def test_user_correction_replans_completed_run(tmp_path):
+    backend = script(**{"supervisor": [plan(), plan()],
+                        "r2:a": [final("changed")], "r2:synthesis": [final("updated")],
+                        "r2:audit": [final("checked")],
+                        "review-verdict": [{"passed": True, "findings": [], "repair": None},
+                                           {"passed": True, "findings": [], "repair": None}]})
+    engine = SwarmEngine(tmp_path, backend_factory=backend.factory)
+    assert engine.run("Original task")["status"] == "completed"
+    engine.store.update_control(message="Change the result")
+    state = engine.run(resume=True)
+    assert state["status"] == "completed" and state["round"] == 2
+    assert state["messages"][-1]["text"] == "Change the result"
+    assert any(role == "supervisor" and "Change the result" in prompt for role, prompt in backend.prompts)
+
+
+def test_progress_agent_can_request_user_input(tmp_path):
+    backend = script(**{"progress-monitor": [{"action": "needs_input",
+                        "reason": "Source data is ambiguous", "guidance": "Ask which source to use"}]})
+    state = SwarmEngine(tmp_path, backend_factory=backend.factory).run("Task")
+    assert state["status"] == "needs_attention"
+    assert state["monitor"][0]["trigger"] == "specialists_finished"
+
+
+def test_progress_agent_can_reject_reviewers_premature_success(tmp_path):
+    backend = script(**{"supervisor": [plan(), plan()],
+                        "r2:a": [final("rechecked")], "r2:synthesis": [final("corrected")],
+                        "r2:audit": [final("verified")],
+                        "review-verdict": [{"passed": True, "findings": [], "repair": None}] * 2,
+                        "progress-monitor": [
+                            {"action": "continue", "reason": "Work exists"},
+                            {"action": "redirect", "reason": "Evidence is insufficient",
+                             "guidance": "Verify the source before accepting"},
+                            {"action": "continue", "reason": "Work rechecked"},
+                            {"action": "continue", "reason": "Evidence verified"}]})
+    state = SwarmEngine(tmp_path, backend_factory=backend.factory).run("Task")
+    assert state["status"] == "completed" and state["round"] == 2
+    assert any(item["trigger"] == "review_passed" and item["action"] == "redirect"
+               for item in state["monitor"])
 
 
 def test_waypost_adapter_accepts_swarms_messages_and_rejects_empty_choices(tmp_path):

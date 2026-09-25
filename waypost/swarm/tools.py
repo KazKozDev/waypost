@@ -8,9 +8,12 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 
 
 class WorkspaceTools:
+    _write_lock = threading.RLock()
+
     def __init__(self, root: Path, output_prefix: str, allow_python: bool = False):
         self.root = root.resolve()
         self.output = self._path(output_prefix)
@@ -63,8 +66,19 @@ class WorkspaceTools:
             content = arguments["content"]
             if not isinstance(content, str) or len(content) > 200000:
                 raise ValueError("content must be text of at most 200000 characters")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content)
+            with self._write_lock:
+                output_parts = prefix.parts
+                if len(output_parts) >= 3 and output_parts[0] == "artifacts" and output_parts[1].startswith("r"):
+                    relative_path = path.relative_to(self.output)
+                    for sibling in self.output.parent.iterdir():
+                        if sibling != self.output and sibling.is_dir():
+                            existing = sibling / relative_path
+                            if existing.is_file():
+                                raise ValueError(
+                                    f"Artifact {relative_path} already exists at "
+                                    f"{existing.relative_to(self.root)}; read that path or choose another filename")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
             return json.dumps({"written": str(path.relative_to(self.root))})
         if name == "run_python" and self.allow_python:
             return self._python(arguments["code"], min(timeout, 30))
