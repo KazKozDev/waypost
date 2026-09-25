@@ -99,6 +99,22 @@ def test_429_blocks_even_with_remaining_quota(db):
     assert not led.can_afford(o, 10)
 
 
+def test_block_holds_for_an_offering_without_limits(db):
+    """A retired model (404 -> 24 h block) with no declared limits used to
+    have no bucket to hold the block, so it was retried on every request."""
+    led = Ledger(db)
+    o = offering(limit_rpm=None, limit_rpd=None, limit_tpm=None)
+    led.register(o)
+    assert led.can_afford(o, 10)
+    led.penalize(o, retry_after_s=86400)
+    assert not led.can_afford(o, 10)
+    assert led.pressure(o) == 1.0
+    assert led.snapshot()["p/m"] == {}
+    revived = Ledger(db)
+    revived.register(o)
+    assert not revived.can_afford(o, 10)
+
+
 # ---------------------------------------------------------------- breaker
 
 
@@ -489,3 +505,24 @@ def test_best_scoring_local_leads_the_ladder(db):
 
     assert plan[0].offering.provider == "ollama"
     assert plan[0].score >= plan[1].score
+
+
+def test_ollama_cloud_marker_is_not_sent_upstream():
+    """ollama.com 404s on 'cloud/gpt-oss:20b'; it knows 'gpt-oss:20b'."""
+    from waypost.prefix import build_payload
+    from waypost.schemas import ChatRequest
+
+    o = offering(name="ollama", model="cloud/gpt-oss:20b")
+    req = ChatRequest(model="auto", messages=[{"role": "user", "content": "hi"}])
+    assert o.key == "ollama/cloud/gpt-oss:20b"
+    assert build_payload(req, o)["model"] == "gpt-oss:20b"
+    assert offering(name="openrouter", model="cloud/x").wire_model_id == "cloud/x"
+
+
+def test_402_switches_instead_of_stopping_the_ladder():
+    from waypost.providers.openai_compat import Verdict, classify_error
+
+    body = '{"error":{"message":"this model is not included in your free usage"}}'
+    err = classify_error(402, body)
+    assert err.verdict is Verdict.SWITCH
+    assert err.retry_after_s >= 3600

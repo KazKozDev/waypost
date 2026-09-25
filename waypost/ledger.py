@@ -25,6 +25,13 @@ from typing import Any
 
 from .registry import Offering
 
+# An offering with no declared limits still has to remember a provider's
+# refusal: blocked_until lives on buckets, and without one a 24 h
+# "model retired" block was dropped on the floor and the dead model kept
+# eating a rung of every ladder. This bucket only ever holds the block.
+BLOCK_ONLY = "block"
+_UNLIMITED = 1 << 62
+
 
 @dataclass
 class Bucket:
@@ -163,6 +170,12 @@ class Ledger:
                         b.used, b.window_start, b.blocked_until = saved[name]
                         b._roll(now)
                     buckets[name] = b
+                if not buckets:
+                    b = Bucket(limit=_UNLIMITED, window_s=60, window_start=now)
+                    if BLOCK_ONLY in saved:
+                        b.used, b.window_start, b.blocked_until = saved[BLOCK_ONLY]
+                        b._roll(now)
+                    buckets[BLOCK_ONLY] = b
                 self._buckets[bk] = buckets
 
     def _affordable(self, bk: str, est_tokens: int, now: float) -> bool:
@@ -176,6 +189,7 @@ class Ledger:
         return [
             (name, b.limit, b.window_s, est_tokens if name == "tpm" else 1)
             for name, b in self._buckets.get(bk, {}).items()
+            if name != BLOCK_ONLY
         ]
 
     def can_afford(
@@ -371,7 +385,11 @@ class Ledger:
                 label = bk
                 if self._key_counts.get(offering_key, 1) <= 1:
                     label = offering_key
-                out[label] = {name: b.remaining(now) for name, b in buckets.items()}
+                out[label] = {
+                    name: b.remaining(now)
+                    for name, b in buckets.items()
+                    if name != BLOCK_ONLY
+                }
             return out
 
     def detailed_snapshot(self) -> dict[str, dict[str, Any]]:

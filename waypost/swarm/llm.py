@@ -68,6 +68,10 @@ class Budget:
             self.store.save(self.state)
 
 
+class EmptyAnswer(ValueError):
+    pass
+
+
 class WaypostLLM:
     def __init__(self, config: SwarmConfig, budget: Budget, store: RunStore,
                  session: str, system: str, client: httpx.Client | None = None):
@@ -80,7 +84,14 @@ class WaypostLLM:
         self.last_response = None
         self.last_error = None
         try:
-            return self._run(task, kwargs.get("messages"))
+            try:
+                return self._run(task, kwargs.get("messages"))
+            except EmptyAnswer as exc:
+                # A 200 with no text is a bad sample, not a routing failure:
+                # one fresh draw is cheaper than failing the whole run.
+                self.store.event("llm_error", session=self.session, status=200,
+                                 error=f"{exc} — повтор")
+                return self._run(task, kwargs.get("messages"))
         except Exception as exc:
             self.last_error = exc
             raise
@@ -111,14 +122,35 @@ class WaypostLLM:
             payload["privacy"] = "strict"
         timeout = min(self.config.request_timeout, self.budget.remaining())
         headers = {"Authorization": "Bearer " + os.getenv("WAYPOST_API_KEY", "unused")}
-        # No implicit HTTP retries: Waypost owns upstream retry/quota accounting.
-        if self.client is not None:
-            response = self.client.post(self.config.base_url.rstrip("/") + "/chat/completions",
-                                        json=payload, headers=headers, timeout=timeout)
-        else:
-            with httpx.Client(trust_env=False) as client:
-                response = client.post(self.config.base_url.rstrip("/") + "/chat/completions",
-                                       json=payload, headers=headers, timeout=timeout)
+        # A router call can take minutes while Waypost walks its ladder; say
+        # it started, or the UI shows nothing until it ends.
+        self.store.event("llm_request", session=self.session)
+        started = time.monotonic()
+        try:
+            # No implicit HTTP retries: Waypost owns upstream retry/quota accounting.
+            if self.client is not None:
+                response = self.client.post(self.config.base_url.rstrip("/") + "/chat/completions",
+                                            json=payload, headers=headers, timeout=timeout)
+            else:
+                with httpx.Client(trust_env=False) as client:
+                    response = client.post(self.config.base_url.rstrip("/") + "/chat/completions",
+                                           json=payload, headers=headers, timeout=timeout)
+        except httpx.HTTPError as exc:
+            self.store.event("llm_error", session=self.session, status=None,
+                             error=f"{type(exc).__name__}: {exc}",
+                             seconds=round(time.monotonic() - started, 1))
+            raise
+        if response.is_error:
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+            error = body.get("error") if isinstance(body, dict) else None
+            message = error.get("message") if isinstance(error, dict) else None
+            self.store.event("llm_error", session=self.session, status=response.status_code,
+                             error=message or response.text[:500],
+                             router=body.get("router", {}) if isinstance(body, dict) else {},
+                             seconds=round(time.monotonic() - started, 1))
         response.raise_for_status()
         data = response.json()
         choices = data.get("choices")
@@ -130,9 +162,10 @@ class WaypostLLM:
             raise ValueError("Waypost response was truncated; increase max_tokens")
         content = choice["message"].get("content")
         if not isinstance(content, str) or not content.strip():
-            raise ValueError("Waypost returned no text")
+            raise EmptyAnswer("Waypost returned no text")
         self.store.event("llm_response", session=self.session,
-                         router=data.get("router", {}), usage=data.get("usage", {}))
+                         router=data.get("router", {}), usage=data.get("usage", {}),
+                         seconds=round(time.monotonic() - started, 1))
         self.last_response = content
         return content
 

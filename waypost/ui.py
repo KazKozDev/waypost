@@ -428,6 +428,9 @@ function addLog(time,label,detail){
   row.innerHTML='<span class="log-time">'+escapeHtml((time||'').slice(11,19))+'</span><span class="log-label">'+escapeHtml(label)+'</span><span class="log-detail">'+escapeHtml(detail)+'</span>';
   $('feed-inner').appendChild(row);scrollDown();
 }
+const agentOf=e=>(e.session||'').split(':').pop()||'агент';
+const secs=e=>e.seconds!=null?' · '+e.seconds+' с':'';
+const ladder=e=>{const p=e.router?.fallback_path||[];return p.length>1?' · перебрано: '+p.join(' → '):''};
 function eventView(e){
   const kind=e.event||'';const task=e.task||e.role||'';
   if(kind==='user_task')return addBubble('Вы',e.text,'user');
@@ -437,9 +440,11 @@ function eventView(e){
   if(kind==='task_done')return addLog(e.time,'Завершил: '+task,e.role||'');
   if(kind==='tool_started')return addLog(e.time,task+' · '+e.tool, e.arguments?.path||e.arguments?.code?.slice(0,100)||'');
   if(kind==='tool_finished')return addLog(e.time,task+' · результат',e.observation||'');
-  if(kind==='llm_response')return addLog(e.time,'Waypost', (e.router?.provider||'')+' / '+(e.router?.model||''));
+  if(kind==='llm_request')return addLog(e.time,'Запрос · '+agentOf(e),'ждём ответ модели…');
+  if(kind==='llm_response')return addLog(e.time,'Ответ · '+agentOf(e),(e.router?.provider||'')+' / '+(e.router?.model||'')+secs(e)+ladder(e));
+  if(kind==='llm_error')return addLog(e.time,'Ошибка · '+agentOf(e),(e.status?e.status+' · ':'')+(e.error||'')+secs(e)+ladder(e));
   if(kind==='invalid_output')return addLog(e.time,'Исправление ответа',e.error||'Неверный формат');
-  if(kind==='run_stopped')return addLog(e.time,'Статус',e.status||'');
+  if(kind==='run_stopped')return addLog(e.time,'Статус',(e.status||'')+(e.error?' · '+e.error:''));
   if(kind==='paused'||kind==='resumed'||kind==='replan'||kind==='interrupt_requested'||kind==='pause_requested'||kind==='resume_requested')return addLog(e.time,'Управление',kind+(e.reason?' · '+e.reason:''));
 }
 async function api(path,options={}){const response=await fetch(path,options);let data=await response.json();if(!response.ok)throw new Error(data.detail||'Ошибка запроса');return data}

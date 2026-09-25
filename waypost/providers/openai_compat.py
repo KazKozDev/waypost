@@ -79,6 +79,11 @@ def classify_error(
         return ProviderError(Verdict.SWITCH, status, body[:300], retry_after)
     if status in (401, 403):
         return ProviderError(Verdict.SWITCH, status, "auth failed", 3600.0)
+    if status == 402:
+        # Unpaid model or account (ollama.com: "not included in your free
+        # usage"). A property of this offering, not of the request — it
+        # used to fall through to FATAL and stop the whole ladder.
+        return ProviderError(Verdict.SWITCH, status, body[:300], 86400.0)
     if (
         status in (404, 410)
         or "end of life" in low

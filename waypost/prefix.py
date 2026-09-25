@@ -85,7 +85,7 @@ def build_payload(
 ) -> dict[str, Any]:
     """Provider request body: router extensions stripped, block order
     stabilized, cache points placed."""
-    payload = req.provider_payload(o.model_id)
+    payload = req.provider_payload(o.wire_model_id)
     if payload.get("messages"):
         payload["messages"] = order_messages(payload["messages"])
     payload = apply_cache_points(payload, o)

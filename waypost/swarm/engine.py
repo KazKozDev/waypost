@@ -105,7 +105,8 @@ class SwarmEngine:
             self.state.update(status="failed", error=f"{type(exc).__name__}: {exc}")
         finally:
             self.budget.checkpoint()
-            self.store.event("run_stopped", status=self.state["status"], calls=self.state["calls"])
+            self.store.event("run_stopped", status=self.state["status"], calls=self.state["calls"],
+                             error=self.state.get("error"))
             report = self.state.get("draft", "")
             if report:
                 (self.store.directory / "result.md").write_text(report)

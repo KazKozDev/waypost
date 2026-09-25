@@ -211,9 +211,17 @@ class Verifier:
                 and REFUSAL_RE.search(content.strip())
             ):
                 return VerifyResult(False, "refusal")
+            # JSON is for a program, not a reader: an agent answering a
+            # Russian task with English keys and values is not a failure,
+            # and escalating it fanned every swarm step out to 5-8 calls.
+            wants_json = (req.response_format or {}).get("type") in (
+                "json_object",
+                "json_schema",
+            )
             if (
                 self.check_language
                 and profile is not None
+                and not wants_json
                 and self._language_mismatch(profile, content)
             ):
                 return VerifyResult(False, "language_mismatch")

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -131,6 +132,16 @@ class Offering:
     @property
     def key(self) -> str:
         return f"{self.provider}/{self.model_id}"
+
+    @property
+    def wire_model_id(self) -> str:
+        """The id the upstream API knows. 'cloud/' is Waypost's own marker
+        for an ollama.com-hosted model; ollama.com 404s on it."""
+        if self.provider.lower() in ("ollama", "local") and is_cloud_ollama_model(
+            self.model_id
+        ):
+            return re.sub(r"^cloud[/:\-_.]", "", self.model_id, flags=re.I)
+        return self.model_id
 
     @property
     def key_names(self) -> list[str]:
