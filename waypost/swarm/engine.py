@@ -14,6 +14,7 @@ from typing import Callable
 import httpx
 from pydantic import ValidationError
 
+from .coordinator import CoordinatorMixin
 from .llm import Budget, BudgetExceeded, RunInterrupted, SwarmsBackend, parse_json
 from .models import (Action, DraftChoice, Plan, PlanChoice, ProgressDecision, Rebuttal, Review,
                      ReviewConsensus, SwarmConfig)
@@ -32,6 +33,9 @@ Return ONLY a JSON object matching the supplied schema, without markdown fences.
 # with the open review findings attached — it never waits on the user.
 AUTONOMOUS_REPLANS = 4
 AUTONOMOUS_FAILED_REVIEWS = 6
+# A worker whose last this-many tool results were all ones it had already
+# seen is stuck; it hands back to the coordinator.
+WORKER_STALE_STEPS = 6
 # Debate: at most this many specialists speak, so a wide plan cannot turn
 # the debate into a call storm.
 DEBATE_SPEAKERS = 5
@@ -91,7 +95,7 @@ def _normalize_task_ids(value):
     return value
 
 
-class SwarmEngine:
+class SwarmEngine(CoordinatorMixin):
     # Pause between retries of a failed model call: attempt n waits n * this.
     RETRY_BACKOFF_S = 3.0
     # The router itself unreachable (restarting, down): wait for it rather
@@ -120,6 +124,9 @@ class SwarmEngine:
     def _run(self, task, resume, acknowledge, base_url=None):
         if resume:
             self.state = self.store.load()
+            # A run saved before v2 was started by the fixed phases; resuming
+            # it under the coordinator would strand its phase state.
+            self.state["config"].setdefault("engine", "pipeline")
             saved = SwarmConfig.model_validate(self.state["config"])
             # Resuming preserves execution settings and tool permissions, but
             # inference goes to the router that is serving the app now.
@@ -191,10 +198,14 @@ class SwarmEngine:
                         else:
                             self._post("dead_end", f"Round {self.state['round']} approach abandoned: {exc}",
                                        "progress-monitor")
-                            self.state["round"] += 1
-                            self.state["phase"] = "plan"
-                            self.state["monitor_guidance"] = str(exc)
-                            self.store.event("replan", reason=str(exc), round=self.state["round"])
+                            if self.config.engine == "coordinator":
+                                # The coordinator rewrites its own ledger next step.
+                                self.state["pending_replan"] = str(exc)
+                            else:
+                                self.state["round"] += 1
+                                self.state["phase"] = "plan"
+                                self.state["monitor_guidance"] = str(exc)
+                                self.store.event("replan", reason=str(exc), round=self.state["round"])
                 if self.state["status"] in {"completed", "needs_attention", "failed"}:
                     break
                 self.budget.checkpoint()
@@ -232,6 +243,10 @@ class SwarmEngine:
         self.budget.checkpoint()
 
     def _advance_phase(self):
+        if self.config.engine == "coordinator":
+            self.state["phase"] = "coordinate"
+            self._coordinate()
+            return
         phase = self.state["phase"]
         if phase == "plan":
             task_limit = (f"At most {self.config.max_tasks} tasks. " if self.config.max_tasks else
@@ -439,7 +454,7 @@ class SwarmEngine:
             return drafts[0]
         return choice.merged or drafts[choice.chosen]
 
-    def _review_panel(self, context: str) -> Review:
+    def _review_panel(self, context: str, width: int | None = None) -> Review:
         """Several reviewers from different model families judge the same
         audit evidence; the majority decides.
 
@@ -452,7 +467,8 @@ class SwarmEngine:
         instruction = ("Decide whether the deliverable meets ALL current criteria. Do not accept unverified "
                        "claims just because another agent made them. If it fails, create a repair DAG; "
                        "otherwise repair=null.")
-        width = self.config.collective_width if self.config.review_panel else 1
+        if width is None:
+            width = self.config.collective_width if self.config.review_panel else 1
         members = self._collective("review-verdict", instruction, context, Review, width=width)
         reviews = [value for value, _ in members]
         if len(reviews) == 1:
@@ -948,11 +964,28 @@ class SwarmEngine:
                 record["history"].append({"observation": observation})
                 self.budget.checkpoint()
             self.store.event("tool_finished", task=key, tool=action.tool, observation=observation)
+            # Stuck is judged by what the agent learns, not by a fixed pattern:
+            # six tool results in a row that it has already seen (re-reading,
+            # re-listing, the same refusal) end its turn, and the coordinator
+            # — who sees the whole picture — decides what happens next.
+            seen = record.setdefault("seen_observations", [])
+            digest = hashlib.sha256(str(observation).encode()).hexdigest()[:16]
+            record["stale_steps"] = record.get("stale_steps", 0) + 1 if digest in seen else 0
+            seen.append(digest)
+            if record["stale_steps"] >= WORKER_STALE_STEPS:
+                answer = (f"STUCK: {WORKER_STALE_STEPS} steps in a row brought nothing new "
+                          f"(last tool: {action.tool}). Files written: {self._artifacts_for(key)}")
+                with self.budget.lock:
+                    record.update(status="done", answer=answer, pending_tool=None)
+                    self.budget.checkpoint()
+                self.store.event("worker_stuck", task=key, role=role, tool=action.tool)
+                return answer
             signature = hashlib.sha256(json.dumps({"action": action.model_dump(), "observation": observation},
                                                   sort_keys=True, ensure_ascii=False).encode()).hexdigest()
             signatures = record.setdefault("tool_signatures", [])
             signatures.append(signature)
-            if len(signatures) >= 3 and len(set(signatures[-3:])) == 1:
+            if (self.config.engine == "pipeline" and len(signatures) >= 3
+                    and len(set(signatures[-3:])) == 1):
                 signatures.clear()
                 decision = self._monitor("repeated_tool_action", f"Agent {key} repeated {action.tool} with the same result")
                 if decision.action == "redirect":

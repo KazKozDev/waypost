@@ -57,3 +57,10 @@ def _no_swarm_outage_pause(monkeypatch):
 
     monkeypatch.setattr(SwarmEngine, "OUTAGE_BACKOFF_S", 0.0)
     monkeypatch.setattr(SwarmEngine, "MODEL_OUTAGE_BACKOFF_S", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _swarm_engine_default(monkeypatch, request):
+    """The suite written for v1 exercises the fixed phases; v2 tests ask for
+    the coordinator explicitly (engine="coordinator")."""
+    monkeypatch.setenv("WAYPOST_SWARM_ENGINE", "pipeline")

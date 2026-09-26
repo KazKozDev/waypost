@@ -457,6 +457,16 @@ function eventView(e){
   if(kind==='llm_response')return addLog(e.time,'Ответ · '+agentOf(e),(e.router?.provider||'')+' / '+(e.router?.model||'')+secs(e)+ladder(e));
   if(kind==='llm_error')return addLog(e.time,'Ошибка · '+agentOf(e),(e.status?e.status+' · ':'')+(e.error||'')+secs(e)+ladder(e));
   if(kind==='invalid_output')return addLog(e.time,'Исправление ответа',e.error||'Неверный формат');
+  if(kind==='coordinator_plan')return addBubble('Ведущий · план (раунд '+e.round+')','Команда: '+(e.team||[]).join(', ')+'\n'+(e.plan||[]).map((x,i)=>(i+1)+'. '+x).join('\n')+(e.facts?.length?'\nФакты: '+e.facts.join('; '):''),'monitor');
+  if(kind==='coordinator_step'){const ACT={post:'вывесить запросы',deliberate:'спор',review:'проверка',finish:'сдать',replan:'новый план'};
+    return addBubble('Ведущий · '+(ACT[e.action]||e.action)+(e.width>1?' · '+e.width+' голоса':''),(e.progress?'✓ есть продвижение':'✗ нет продвижения')+(e.looping?' · петля':'')+(e.done?' · готово':'')+'\n'+(e.reasoning||'')+(e.question?'\nВопрос: '+e.question:'')+(e.requests?.length?'\nЗапросы: '+e.requests.join(', '):''),'monitor')}
+  if(kind==='request_posted')return addLog(e.time,'Доска · запрос '+e.request,e.need||'');
+  if(kind==='volunteers')return addLog(e.time,'Отклики · '+e.request,(e.offers||[]).length?e.offers.map(o=>o.role+' '+Math.round((o.confidence||0)*100)+'%: '+o.approach).join(' | '):'никто не взялся');
+  if(kind==='request_done')return addLog(e.time,(e.status==='failed'?'Застрял · ':'Готово · ')+e.request,(e.by||'')+(e.files?.length?' · файлы: '+e.files.join(', '):''));
+  if(kind==='worker_stuck')return addLog(e.time,'Застрял · '+(e.task||''),'6 шагов без нового — возвращаю ведущему');
+  if(kind==='deliberation')return e.positions?addBubble('Спор · раунд 1',e.positions.map((p,i)=>'№'+(i+1)+' ['+(p.family||'модель')+'] '+p.stance+' — '+p.argument).join('\n'),'monitor'):addLog(e.time,'Спор · раунд '+e.round,'поддержка: '+(e.support||[]).map(n=>'№'+(n+1)).join(', ')+(e.persuaded?.length?' · переубедило: '+e.persuaded.join('; '):''));
+  if(kind==='ruling')return addBubble('Решение спора · '+(e.why==='consensus'?'согласие':'по доводу'),(e.question?e.question+'\n→ ':'')+e.stance+'\nДовод: '+e.argument+(e.why&&e.why!=='consensus'?'\nПочему: '+e.why:''),'result');
+  if(kind==='coordinator_finish')return addLog(e.time,'Ведущий','работа сдана и прошла проверку');
   if(kind==='collective')return addLog(e.time,'Коллектив · '+(e.role||''),(e.size||0)+' из '+(e.width||e.size||0)+(e.families?.length?': '+e.families.filter(Boolean).join(', '):'')+(e.reason?' · сузился: '+e.reason:''));
   if(kind==='collective_narrowed')return;
   if(kind==='review_panel')return addBubble('Комиссия проверки · '+(e.passed?'прошло':'не прошло'),(e.votes||[]).map(v=>(v.passed?'✓ ':'✗ ')+(v.family||'модель')+(v.findings?.length?': '+v.findings.join('; '):'')).join('\n')+(e.confirmed?.length?'\nПодтверждено ≥2: '+e.confirmed.join('; '):''),'monitor');

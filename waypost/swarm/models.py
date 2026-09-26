@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -31,6 +32,10 @@ class SwarmConfig(StrictModel):
     debate: bool = True
     debate_rounds: int = Field(default=1, ge=1, le=2)
     memory: bool = True
+    # coordinator: a coordinator decides every step (v2); pipeline: the
+    # fixed phases of v1, kept for resuming old runs and for comparison.
+    engine: Literal["coordinator", "pipeline"] = Field(
+        default_factory=lambda: os.getenv("WAYPOST_SWARM_ENGINE", "coordinator"))
 
 
 class Task(StrictModel):
@@ -140,3 +145,76 @@ class Rebuttal(StrictModel):
     each other or this specialist's own findings, and what should change."""
     contradictions: list[str]
     corrections: list[str] = Field(default_factory=list)
+
+
+# ------------------------------------------------------ coordinator (v2)
+
+
+class TeamMember(StrictModel):
+    role: str = Field(min_length=1, max_length=200)
+    strengths: str = ""
+
+
+class TaskLedger(StrictModel):
+    """The coordinator's picture of the task (Magentic-One's task ledger):
+    what is known, what is guessed, the open plan, and the team it wants."""
+    acceptance: list[str] = Field(min_length=1)
+    facts: list[str] = Field(default_factory=list)
+    guesses: list[str] = Field(default_factory=list)
+    plan: list[str] = Field(min_length=1)
+    team: list[TeamMember] = Field(min_length=1, max_length=6)
+
+
+class RequestSpec(StrictModel):
+    id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,48}$")
+    need: str = Field(min_length=1, max_length=4000)
+    why: str = ""
+    done_when: str = ""
+
+
+class CoordinatorStep(StrictModel):
+    """One coordinator turn (Magentic-One's progress ledger): judge where
+    the work stands, then choose exactly one action."""
+    is_done: bool
+    progress: bool
+    looping: bool
+    reasoning: str = Field(min_length=1)
+    action: Literal["post", "deliberate", "review", "finish", "replan"]
+    requests: list[RequestSpec] = Field(default_factory=list)
+    question: str | None = None
+    width: int = Field(default=1, ge=1, le=5)
+
+    @model_validator(mode="after")
+    def action_arguments(self):
+        if self.action == "post" and not self.requests:
+            raise ValueError("post requires at least one request")
+        if self.action == "deliberate" and not (self.question and self.question.strip()):
+            raise ValueError("deliberate requires a question")
+        return self
+
+
+class Claim(StrictModel):
+    request: str
+    confidence: float = Field(ge=0, le=1)
+    approach: str = Field(min_length=1)
+
+
+class Volunteer(StrictModel):
+    """A team member's answer to the open requests: the ones it takes."""
+    claims: list[Claim] = Field(default_factory=list)
+
+
+class Position(StrictModel):
+    """A debate turn. Round 1: `stance` and `argument` are the member's own;
+    later rounds: `supports` names the position (0-based) it now backs and
+    `persuaded_by` says which argument moved it, if any."""
+    stance: str = Field(min_length=1)
+    argument: str = Field(min_length=1)
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    supports: int | None = Field(default=None, ge=0)
+    persuaded_by: str = ""
+
+
+class DebateRuling(StrictModel):
+    chosen: int = Field(ge=0)
+    why: str = Field(min_length=1)
