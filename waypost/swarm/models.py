@@ -162,7 +162,11 @@ class TaskLedger(StrictModel):
     facts: list[str] = Field(default_factory=list)
     guesses: list[str] = Field(default_factory=list)
     plan: list[str] = Field(min_length=1)
-    team: list[TeamMember] = Field(min_length=1, max_length=6)
+    # At least two, so members have someone to volunteer against and a
+    # second perspective exists (e.g. a builder and a critic).
+    team: list[TeamMember] = Field(min_length=2, max_length=6)
+    # How many model families decide each fork, by task complexity.
+    council: int = Field(default=2, ge=2, le=5)
 
 
 class RequestSpec(StrictModel):
@@ -170,6 +174,8 @@ class RequestSpec(StrictModel):
     need: str = Field(min_length=1, max_length=4000)
     why: str = ""
     done_when: str = ""
+    # Requests this one needs finished first ("review" after "write").
+    depends_on: list[str] = Field(default_factory=list)
 
 
 class CoordinatorStep(StrictModel):
@@ -218,3 +224,15 @@ class Position(StrictModel):
 class DebateRuling(StrictModel):
     chosen: int = Field(ge=0)
     why: str = Field(min_length=1)
+
+
+class Assignment(StrictModel):
+    request: str
+    role: str
+    why: str = Field(min_length=1)
+
+
+class Assignments(StrictModel):
+    """Who takes each contested request, decided by comparing the
+    volunteers' approaches — not their self-reported confidence."""
+    assignments: list[Assignment]

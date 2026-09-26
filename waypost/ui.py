@@ -457,11 +457,14 @@ function eventView(e){
   if(kind==='llm_response')return addLog(e.time,'Ответ · '+agentOf(e),(e.router?.provider||'')+' / '+(e.router?.model||'')+secs(e)+ladder(e));
   if(kind==='llm_error')return addLog(e.time,'Ошибка · '+agentOf(e),(e.status?e.status+' · ':'')+(e.error||'')+secs(e)+ladder(e));
   if(kind==='invalid_output')return addLog(e.time,'Исправление ответа',e.error||'Неверный формат');
-  if(kind==='coordinator_plan')return addBubble('Ведущий · план (раунд '+e.round+')','Команда: '+(e.team||[]).join(', ')+'\n'+(e.plan||[]).map((x,i)=>(i+1)+'. '+x).join('\n')+(e.facts?.length?'\nФакты: '+e.facts.join('; '):''),'monitor');
+  if(kind==='coordinator_plan')return addBubble('Совет · план (раунд '+e.round+')','Команда: '+(e.team||[]).join(', ')+(e.council?' · решают '+e.council+' модели':'')+'\n'+(e.plan||[]).map((x,i)=>(i+1)+'. '+x).join('\n')+(e.facts?.length?'\nФакты: '+e.facts.join('; '):''),'monitor');
   if(kind==='coordinator_step'){const ACT={post:'вывесить запросы',deliberate:'спор',review:'проверка',finish:'сдать',replan:'новый план'};
-    return addBubble('Ведущий · '+(ACT[e.action]||e.action)+(e.width>1?' · '+e.width+' голоса':''),(e.progress?'✓ есть продвижение':'✗ нет продвижения')+(e.looping?' · петля':'')+(e.done?' · готово':'')+'\n'+(e.reasoning||'')+(e.question?'\nВопрос: '+e.question:'')+(e.requests?.length?'\nЗапросы: '+e.requests.join(', '):''),'monitor')}
+    return addBubble('Совет · '+(ACT[e.action]||e.action)+(e.width>1?' · '+e.width+' голоса':''),(e.progress?'✓ есть продвижение':'✗ нет продвижения')+(e.looping?' · петля':'')+(e.done?' · готово':'')+'\n'+(e.reasoning||'')+(e.question?'\nВопрос: '+e.question:'')+(e.requests?.length?'\nЗапросы: '+e.requests.join(', '):''),'monitor')}
   if(kind==='request_posted')return addLog(e.time,'Доска · запрос '+e.request,e.need||'');
-  if(kind==='volunteers')return addLog(e.time,'Отклики · '+e.request,(e.offers||[]).length?e.offers.map(o=>o.role+' '+Math.round((o.confidence||0)*100)+'%: '+o.approach).join(' | '):'никто не взялся');
+  if(kind==='volunteers')return addLog(e.time,'Отклики · '+e.request,(e.offers||[]).length?e.offers.map(o=>o.role+(o.family?' ['+o.family+']':'')+': '+o.approach).join(' | ')+(e.why?' → '+e.why:''):'никто не взялся');
+  if(kind==='council'){const SUBJ={'coordinator-plan':'план','coordinator':'следующий шаг',deliberate:'развилка'};
+    return addLog(e.time,'Совет · '+(SUBJ[e.subject]||e.subject),(e.families||[]).filter(Boolean).join(', ')+' → №'+((e.chosen||0)+1)+' · '+({consensus:'согласие','agreed independently':'согласились независимо','only one family answered':'жива одна модель'}[e.why]||e.why||''))}
+  if(kind==='council_vote')return addLog(e.time,'Совет · голосование '+e.round,'поддержка: '+(e.support||[]).map(n=>'№'+(n+1)).join(', ')+(e.persuaded?.length?' · переубедило: '+e.persuaded.join('; '):''));
   if(kind==='request_done')return addLog(e.time,(e.status==='failed'?'Застрял · ':'Готово · ')+e.request,(e.by||'')+(e.files?.length?' · файлы: '+e.files.join(', '):''));
   if(kind==='worker_stuck')return addLog(e.time,'Застрял · '+(e.task||''),'6 шагов без нового — возвращаю ведущему');
   if(kind==='deliberation')return e.positions?addBubble('Спор · раунд 1',e.positions.map((p,i)=>'№'+(i+1)+' ['+(p.family||'модель')+'] '+p.stance+' — '+p.argument).join('\n'),'monitor'):addLog(e.time,'Спор · раунд '+e.round,'поддержка: '+(e.support||[]).map(n=>'№'+(n+1)).join(', ')+(e.persuaded?.length?' · переубедило: '+e.persuaded.join('; '):''));
