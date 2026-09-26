@@ -190,12 +190,12 @@ def test_write_accepts_advertised_workspace_relative_output_path(tmp_path):
     assert "done" in tools.execute("read_file", {"path": result["written"]})
 
 
-def test_same_round_agents_cannot_create_duplicate_artifact_path(tmp_path):
+def test_same_round_duplicate_name_is_noted_and_never_overwrites(tmp_path):
     first = WorkspaceTools(tmp_path, "artifacts/r1/writer")
     second = WorkspaceTools(tmp_path, "artifacts/r1/reviewer")
     first.execute("write_file", {"path": "CHECKLIST.md", "content": "original"})
-    with pytest.raises(ValueError, match="read that path"):
-        second.execute("write_file", {"path": "CHECKLIST.md", "content": "duplicate"})
+    result = json.loads(second.execute("write_file", {"path": "CHECKLIST.md", "content": "duplicate"}))
+    assert "artifacts/r1/writer/CHECKLIST.md" in result["note"]
     assert (tmp_path / "artifacts/r1/writer/CHECKLIST.md").read_text() == "original"
 
 

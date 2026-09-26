@@ -67,6 +67,30 @@ class ModelUnavailable(RuntimeError):
     the loop fuse, not a crash, is what ends a run the router cannot serve."""
 
 
+def _normalize_task_ids(value):
+    """Models copy the engine's record keys ('r2:comment_code') into task
+    ids, which the schema forbids; a live run lost a whole round to six
+    rejections of that. The meaning is unambiguous, so fix the spelling
+    instead of refusing it."""
+    def clean(task_id):
+        if not isinstance(task_id, str):
+            return task_id
+        return re.sub(r"[^a-zA-Z0-9_-]", "_", re.sub(r"^r\d+:", "", task_id))[:48] or task_id
+
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key == "tasks" and isinstance(item, list):
+                item = [{**t, "id": clean(t.get("id")),
+                         "depends_on": [clean(d) for d in t.get("depends_on", []) or []]}
+                        if isinstance(t, dict) else t for t in item]
+            out[key] = _normalize_task_ids(item) if key != "tasks" else item
+        return out
+    if isinstance(value, list):
+        return [_normalize_task_ids(v) for v in value]
+    return value
+
+
 class SwarmEngine:
     # Pause between retries of a failed model call: attempt n waits n * this.
     RETRY_BACKOFF_S = 3.0
@@ -715,7 +739,7 @@ class SwarmEngine:
                 time.sleep(self.RETRY_BACKOFF_S * failures)
                 continue
             try:
-                value = schema.model_validate(parse_json(raw))
+                value = schema.model_validate(_normalize_task_ids(parse_json(raw)))
                 plan = value if isinstance(value, Plan) else getattr(value, "repair", None)
                 if plan and self.config.max_tasks is not None and len(plan.tasks) > self.config.max_tasks:
                     raise ValueError("Too many tasks for configured max_tasks")

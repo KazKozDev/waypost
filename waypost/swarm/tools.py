@@ -46,8 +46,12 @@ class WorkspaceTools:
                                for p in sorted(path.iterdir())][:500])
         if name == "read_file":
             path = self._path(arguments["path"])
-            if not path.is_file() or path.stat().st_size > 2_000_000:
-                raise ValueError("Read requires a regular file smaller than 2 MB")
+            if not path.exists():
+                raise ValueError(f"File not found: {arguments['path']} — call list_files to see what exists")
+            if not path.is_file():
+                raise ValueError(f"{arguments['path']} is a directory; call list_files on it")
+            if path.stat().st_size > 2_000_000:
+                raise ValueError("File is larger than 2 MB")
             offset = int(arguments.get("offset", 0))
             if offset < 0:
                 raise ValueError("offset must be nonnegative")
@@ -67,19 +71,22 @@ class WorkspaceTools:
             if not isinstance(content, str) or len(content) > 200000:
                 raise ValueError("content must be text of at most 200000 characters")
             with self._write_lock:
+                # Another agent's file of the same name is worth knowing about,
+                # not a reason to refuse: the refusal trapped two synthesizers
+                # in a read-write loop for 97 calls on a live run.
+                others = []
                 output_parts = prefix.parts
                 if len(output_parts) >= 3 and output_parts[0] == "artifacts" and output_parts[1].startswith("r"):
                     relative_path = path.relative_to(self.output)
                     for sibling in self.output.parent.iterdir():
-                        if sibling != self.output and sibling.is_dir():
-                            existing = sibling / relative_path
-                            if existing.is_file():
-                                raise ValueError(
-                                    f"Artifact {relative_path} already exists at "
-                                    f"{existing.relative_to(self.root)}; read that path or choose another filename")
+                        if sibling != self.output and sibling.is_dir() and (sibling / relative_path).is_file():
+                            others.append(str((sibling / relative_path).relative_to(self.root)))
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(content)
-            return json.dumps({"written": str(path.relative_to(self.root))})
+            result = {"written": str(path.relative_to(self.root))}
+            if others:
+                result["note"] = "other agents have a file with this name: " + ", ".join(others)
+            return json.dumps(result)
         if name == "run_python" and self.allow_python:
             return self._python(arguments["code"], min(timeout, 30))
         raise ValueError(f"Unknown or disabled tool: {name}")

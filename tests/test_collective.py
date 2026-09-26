@@ -639,3 +639,35 @@ def test_new_family_local_model_beats_repeating_an_old_cloud_family(tmp_path):
     assert ladder(None)[-1] == "qwen3.8:27b"  # no second opinion asked: local is the tail
     assert ladder(["llama", "openai"])[0] == "qwen3.8:27b"
     assert ladder(["qwen"])[-1] == "qwen3.8:27b"  # local already heard: tail again
+
+
+# ------------------------------------------ v2 stage 1: traps and messages
+
+
+def test_same_filename_as_another_agent_is_written_with_a_note(tmp_path):
+    from waypost.swarm.tools import WorkspaceTools
+    first = WorkspaceTools(tmp_path, "artifacts/r1/synthesis")
+    second = WorkspaceTools(tmp_path, "artifacts/r1/synthesis#2")
+    first.execute("write_file", {"path": "snake.py", "content": "a"})
+    result = json.loads(second.execute("write_file", {"path": "snake.py", "content": "b"}))
+    assert result["written"] == "artifacts/r1/synthesis#2/snake.py"
+    assert "artifacts/r1/synthesis/snake.py" in result["note"]
+    assert (tmp_path / "artifacts/r1/synthesis#2/snake.py").read_text() == "b"
+
+
+def test_missing_file_says_not_found(tmp_path):
+    from waypost.swarm.tools import WorkspaceTools
+    tools = WorkspaceTools(tmp_path, "artifacts/r1/a")
+    with pytest.raises(ValueError, match="File not found"):
+        tools.execute("read_file", {"path": "nope.py"})
+
+
+def test_record_keys_in_task_ids_are_normalized(tmp_path):
+    from waypost.swarm.engine import _normalize_task_ids
+    from waypost.swarm.models import Review
+    raw = {"passed": False, "findings": ["x"], "repair": {"acceptance": ["a"], "tasks": [
+        {"id": "r2:comment_code", "role": "r", "instruction": "i", "depends_on": []},
+        {"id": "r2:write_readme", "role": "r", "instruction": "i", "depends_on": ["r2:comment_code"]}]}}
+    review = Review.model_validate(_normalize_task_ids(raw))
+    assert [t.id for t in review.repair.tasks] == ["comment_code", "write_readme"]
+    assert review.repair.tasks[1].depends_on == ["comment_code"]
