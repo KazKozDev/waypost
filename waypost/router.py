@@ -583,8 +583,22 @@ class Router:
         if req.profile == "privacy_only":
             head = (local_cands + cloud_cands)[:limit]
         elif self.local_last and cloud_cands:
-            head = cloud_cands[: max(1, limit - 1)] + local_cands[:1] if local_cands \
-                else cloud_cands[:limit]
+            # Local stays behind the cloud — but not behind a family that
+            # already answered: asked for a new opinion, a live local model
+            # of a new family beats repeating an old one.
+            def heard(c: Candidate) -> bool:
+                return model_family(c.offering.model_id) in avoid
+
+            fresh_local = [c for c in local_cands if not heard(c)]
+            ordered = (
+                [c for c in cloud_cands if not heard(c)]
+                + fresh_local[:1]
+                + [c for c in cloud_cands if heard(c)]
+                + ([] if fresh_local else local_cands[:1])
+            )
+            head = ordered[:limit]
+            if local_cands and not any(c.offering.is_local for c in head):
+                head = head[: max(0, limit - 1)] + local_cands[:1]
         else:
             merged = sorted(cloud_cands + local_cands, key=order)
             head = merged[:limit]

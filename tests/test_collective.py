@@ -615,3 +615,27 @@ def test_ollama_losing_its_model_switches_instead_of_stopping():
     assert classify_error(400, '{"error":{"message":"model is required"}}').verdict is Verdict.SWITCH
     assert classify_error(400, '{"error":"model \'qwen3.8:27b-mlx\' not found"}').verdict is Verdict.SWITCH
     assert classify_error(400, '{"error":"bad field"}').verdict is Verdict.FATAL
+
+
+def test_new_family_local_model_beats_repeating_an_old_cloud_family(tmp_path):
+    """Asked for a third opinion with llama and openai already heard, a live
+    local qwen must come before llama again — the '2 of 3, got llama again'
+    narrowing seen on a live run."""
+    llama = _offering("llama-70b", 0.9)
+    gpt = _offering("gpt-oss-120b", 0.9)
+    local = Offering(provider="local", model_id="qwen3.8:27b", base_url="http://l/v1",
+                     caps=CAPS, quality_score=0.8, is_local=True, trains_on_data=False)
+    ledger = Ledger(str(tmp_path / "r.db"))
+    for o in (llama, gpt, local):
+        ledger.register(o)
+    router = Router(Registry([llama, gpt, local]), ledger, CircuitBreaker(),
+                    stochastic=False, local_last=True)
+
+    def ladder(avoid):
+        req = ChatRequest(messages=[ChatMessage(role="user", content="hi")],
+                          latency_class="batch", avoid_families=avoid)
+        return [c.offering.model_id for c in router.plan(req, classify_l0(req))]
+
+    assert ladder(None)[-1] == "qwen3.8:27b"  # no second opinion asked: local is the tail
+    assert ladder(["llama", "openai"])[0] == "qwen3.8:27b"
+    assert ladder(["qwen"])[-1] == "qwen3.8:27b"  # local already heard: tail again
