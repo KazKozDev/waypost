@@ -168,8 +168,12 @@ class WorkspaceTools:
         env.update(HOME=str(self.scratch), TMPDIR=str(self.scratch), PIP_TARGET=str(self.lib),
                    PIP_CACHE_DIR=str(self.scratch / "pip-cache"), PIP_DISABLE_PIP_VERSION_CHECK="1",
                    SWARM_LIB=str(self.lib))
-        # -I ignores PYTHONPATH, so the shared library is put on sys.path here.
-        code = f"import sys as _s; _s.path.insert(0, {str(self.lib)!r}); del _s\n" + code
+        # -I drops the working directory and ignores PYTHONPATH: put the
+        # agent's own directory (its modules) and the shared library back.
+        # Without the first, `import hello_world` failed on a file the agent
+        # had just written, and a hello-world run lost an attempt to it.
+        code = (f"import sys as _s; _s.path[:0] = [{str(self.output)!r}, {str(self.lib)!r}]; del _s\n"
+                + code)
         command = [self.SANDBOX_EXEC, "-p", self._sandbox_profile(), sys.executable, "-I", "-c", code]
         with tempfile.TemporaryFile() as output:
             proc = subprocess.Popen(command, cwd=self.output,

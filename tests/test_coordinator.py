@@ -350,3 +350,12 @@ def test_code_mess_stays_out_of_the_deliverables(tmp_path):
     b = WorkspaceTools(ws, "artifacts/r1/b", allow_python=True)
     out = json.loads(b.execute("run_python", {"code": "import sharedpkg; print(sharedpkg.VALUE)"}, timeout=20))
     assert out["output"].strip() == "7", out
+
+
+@_pytest.mark.skipif(not _has_sandbox, reason="needs macOS sandbox-exec")
+def test_agent_code_imports_its_own_files(tmp_path):
+    from waypost.swarm.tools import WorkspaceTools
+    t = WorkspaceTools(tmp_path / "ws", "artifacts/t/goal/1", allow_python=True)
+    t.execute("write_file", {"path": "hello_world.py", "content": "print('Hello, World!')"})
+    out = json.loads(t.execute("run_python", {"code": "import hello_world"}, timeout=20))
+    assert out["exit_code"] == 0 and out["output"].strip() == "Hello, World!", out

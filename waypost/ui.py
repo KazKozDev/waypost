@@ -437,7 +437,7 @@ function addLog(time,label,detail){
   row.innerHTML='<span class="log-time">'+escapeHtml((time||'').slice(11,19))+'</span><span class="log-label">'+escapeHtml(label)+'</span><span class="log-detail">'+escapeHtml(detail)+'</span>';
   $('feed-inner').appendChild(row);scrollDown();
 }
-const agentOf=e=>(e.session||'').split(':').pop()||'агент';
+const agentOf=e=>{const s=(e.session||'').split(':');if(s[1]==='t'&&s[2])return s[2]+(s[3]&&s[3]!=='1'?' #'+s[3]:'');return s.pop()||'агент'};
 const secs=e=>e.seconds!=null?' · '+e.seconds+' с':'';
 const ladder=e=>{const p=e.router?.fallback_path||[];return p.length>1?' · перебрано: '+p.join(' → '):''};
 const BOARD_KINDS={fact:'Факт',decision:'Решение',assumption:'Допущение',dead_end:'Тупик'};
