@@ -30,8 +30,9 @@ _PASSTHROUGH = ("RunInterrupted", "BudgetExceeded")
 AGENT_RULES = (
     "You are one agent of a swarm. There are no meetings: the board shows what is done, claimed and "
     "dead — never redo done work; reuse its results and files. For YOUR task choose exactly one:\n"
-    "- kind=final: you did it. answer = the result itself (the text, the answer with its sources, the "
-    "numbers, what the files do). PROVE it, never claim it: facts — cite the sources you actually opened "
+    "- kind=final: you did it. answer = the result itself, as readable text for a person (markdown is "
+    "fine; never JSON), in the SAME LANGUAGE as the task — the text, the answer with its sources, the "
+    "numbers, what the files do. PROVE it, never claim it: facts — cite the sources you actually opened "
     "(web_search, fetch_url), never your memory; numbers — compute them (run_python); code — run it and "
     "its tests; text — meet every requirement of the task (length, tone, points). Set work_kind to what "
     "you did (research/analyze/write/decide/build). An independent agent will check your proof.\n"
@@ -62,9 +63,24 @@ VERIFY_HOW = {
 }
 VERIFY_RULES = (
     "You are an independent checker in an agent swarm. You did not write this result. Check it with "
-    "outside evidence, not with trust. {how}\nFinish with kind=final and answer starting with the word "
-    "VERIFIED if it holds up, or with PROBLEMS: followed by one problem per line."
+    "outside evidence, not with trust: USE YOUR TOOLS before any verdict — a verdict without evidence you "
+    "gathered yourself is thrown away. {how} Also: the result must be readable text in the same language "
+    "as the task.\nFinish with kind=final and answer starting with the word VERIFIED if it holds up, or "
+    "with PROBLEMS: followed by one problem per line."
 )
+# Kinds whose check is meaningless without gathered evidence.
+EVIDENCE_KINDS = ("research", "analyze")
+
+
+def _looks_like_json(text: str) -> bool:
+    text = text.strip()
+    if not text or text[0] not in "{[":
+        return False
+    try:
+        json.loads(text)
+        return True
+    except ValueError:
+        return False
 
 
 def _fingerprint(goal: str) -> str:
@@ -297,6 +313,13 @@ class StigmergyMixin:
     def _on_final(self, task, outcome, key, record):
         files = self._artifacts_for(key)
         answer = str(outcome.get("answer", ""))
+        if _looks_like_json(answer) and task["attempts"] < MAX_ATTEMPTS:
+            # A person reads the result: a JSON dump is not an answer.
+            task["notes"].append("Your answer was JSON. Give the result as readable text for a person, in the "
+                                 "language of the task (put code in files or code blocks).")
+            task["status"] = "needed"
+            self.store.event("answer_not_readable", task=task["id"])
+            return
         wrote_code = any(f.endswith(".py") for f in files)
         kind = outcome.get("work_kind") or task["kind"]
         if kind in ("auto", None):
@@ -333,19 +356,34 @@ class StigmergyMixin:
         """A second agent, on another model, checks the result with outside
         evidence. Returns (ok, problems), or None when no checker could be
         reached — a missing checker does not block the work."""
-        key = f"v:{task['id']}:{task['attempts']}"
         context = json.dumps({"task": task["goal"], "goals_above": self._board_brief(task)["goals_above"],
                               "result_to_check": answer[:12000], "files": files}, ensure_ascii=False)
-        try:
-            verdict = self._worker("independent checker", VERIFY_RULES.format(how=VERIFY_HOW[kind]), context,
-                                   key, read_only=True, avoid_families=task.get("tried_families") or None,
-                                   max_failures=1, tier_hint="M")
-        except Exception as exc:  # noqa: BLE001
-            if type(exc).__name__ in _PASSTHROUGH:
-                raise
-            self.store.event("verify_unavailable", task=task["id"], error=str(exc)[:200])
+        text = ""
+        for round_no in (1, 2):
+            key = f"v:{task['id']}:{task['attempts']}" + ("" if round_no == 1 else "#2")
+            instruction = VERIFY_RULES.format(how=VERIFY_HOW[kind])
+            if round_no == 2:
+                instruction += ("\nYour previous verdict was thrown away: you gathered no evidence. Open the "
+                                "sources / compute the numbers with your tools this time.")
+            try:
+                verdict = self._worker("independent checker", instruction, context, key, read_only=True,
+                                       avoid_families=task.get("tried_families") or None,
+                                       max_failures=1, tier_hint="M")
+            except Exception as exc:  # noqa: BLE001
+                if type(exc).__name__ in _PASSTHROUGH:
+                    raise
+                self.store.event("verify_unavailable", task=task["id"], error=str(exc)[:200])
+                return None
+            text = str(verdict).strip()
+            used_tools = any((h.get("action") or {}).get("kind") == "tool"
+                             for h in self.state["records"].get(key, {}).get("history", []))
+            if used_tools or kind not in EVIDENCE_KINDS:
+                break
+            # A verdict on facts or numbers without evidence is not evidence.
+            self.store.event("verdict_without_evidence", task=task["id"], round=round_no)
+        else:
+            self.store.event("verify_unavailable", task=task["id"], error="checker gathered no evidence")
             return None
-        text = str(verdict).strip()
         if text.upper().startswith("VERIFIED"):
             self.store.event("verified", task=task["id"], work_kind=kind)
             return True, []

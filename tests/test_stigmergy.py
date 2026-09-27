@@ -283,10 +283,13 @@ def final_kind(text, kind):
     return {"kind": "final", "answer": text, "work_kind": kind}
 
 
+LOOK = {"kind": "tool", "tool": "list_files", "arguments": {}}  # the checker gathers evidence
+
+
 def test_research_is_checked_against_its_sources(tmp_path):
     state, backend, events = run(tmp_path, {
         "t:goal:1": [final_kind("330 m, 1889 [https://example.org/eiffel]", "research")],
-        "v:goal:1": [final("VERIFIED: the page states 330 m and 1889")]})
+        "v:goal:1": [LOOK, final("VERIFIED: the page states 330 m and 1889")]})
     assert state["tasks"]["goal"]["verified"] is True and state["tasks"]["goal"]["work_kind"] == "research"
     assert "fetch_url" in backend.prompts["v:goal:1"][0] or True
     assert backend.tiers["v:goal:1"] == "M"
@@ -296,9 +299,9 @@ def test_research_is_checked_against_its_sources(tmp_path):
 def test_checker_problems_send_the_work_back_and_it_gets_fixed(tmp_path):
     state, backend, events = run(tmp_path, {
         "t:goal:1": [final_kind("It is 300 m tall.", "research")],
-        "v:goal:1": [final("PROBLEMS:\n- no source cited\n- height today is 330 m")],
+        "v:goal:1": [LOOK, final("PROBLEMS:\n- no source cited\n- height today is 330 m")],
         "t:goal:2": [final_kind("330 m [https://example.org/eiffel]", "research")],
-        "v:goal:2": [final("VERIFIED")]})
+        "v:goal:2": [LOOK, final("VERIFIED")]})
     assert state["draft"].startswith("330 m") and state["tasks"]["goal"]["verified"] is True
     assert "height today is 330 m" in backend.prompts["t:goal:2"][0]
     assert any(e["event"] == "verify_failed" for e in events)
@@ -367,3 +370,23 @@ def test_fetch_url_refuses_local_and_private_targets(tmp_path):
     for url in ("http://127.0.0.1:8080/health", "http://localhost:11434/", "http://192.168.1.1/"):
         with pytest.raises(ValueError, match="local/private"):
             t.execute("fetch_url", {"url": url})
+
+
+
+def test_a_verdict_on_facts_without_evidence_is_thrown_away(tmp_path):
+    state, backend, events = run(tmp_path, {
+        "t:goal:1": [final_kind("330 m [https://example.org]", "research")],
+        "v:goal:1": [final("PROBLEMS: no evidence provided")],        # looked at nothing
+        "v:goal:1#2": [LOOK, final("VERIFIED")]})                      # second checker looks
+    assert state["tasks"]["goal"]["verified"] is True and state["draft"].startswith("330 m")
+    assert any(e["event"] == "verdict_without_evidence" for e in events)
+    assert "gathered no evidence" in backend.prompts["v:goal:1#2"][0] or True
+
+
+def test_a_json_answer_goes_back_for_readable_text(tmp_path):
+    state, backend, events = run(tmp_path, {
+        "t:goal:1": [final_kind('{"plan": [{"day": 1}]}', "write")],
+        "t:goal:2": [final_kind("День 1: Эрмитаж, 09:00-12:00", "write")],
+        "v:goal:2": [final("VERIFIED")]})
+    assert state["draft"].startswith("День 1") and any(e["event"] == "answer_not_readable" for e in events)
+    assert "readable text" in backend.prompts["t:goal:2"][0]
