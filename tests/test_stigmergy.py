@@ -214,3 +214,11 @@ def test_agent_history_does_not_resend_whole_files():
     compact = json.dumps(_compact_history(history))
     assert len(compact) < 2 * HISTORY_TEXT_LIMIT + 500
     assert "read_file for the rest" in compact and '"path": "a.py"' in compact
+
+
+def test_the_result_carries_the_product_files(tmp_path):
+    state, backend, events = run(tmp_path, {
+        "t:goal:1": [write("snake.py", "print('snake')"), RUN, final("pip output: installed pygame")]})
+    assert state["status"] == "completed"
+    assert "Файлы результата" in state["draft"] and "artifacts/t/goal/1/snake.py" in state["draft"]
+    assert "print('snake')" in state["draft"]

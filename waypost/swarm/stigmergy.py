@@ -154,11 +154,32 @@ class StigmergyMixin:
         ran = any(t["verified"] for t in self._tasks().values())
         if goal["status"] == "done" and wrote_code and not ran and self.config.allow_python:
             self.state["draft"] += "\n\n---\nНе проверено запуском."
+        self.state["draft"] += self._package_files()
         if reason:
             self._finish_best_effort(reason)
             return
         self.state["status"] = "completed"
         self.store.event("swarm_done", goal_status=goal["status"], verified=goal["verified"])
+
+    def _package_files(self) -> str:
+        """The product is the files, whatever the agent chose to say: list
+        them and include the code. Build byproducts are not the product."""
+        noise = ("__pycache__", ".dist-info", "/.", "Library/Caches", "/include/", "/bin/", "/lib/")
+        files = sorted({f for t in self._tasks().values() if t["status"] == "done" for f in t["files"]
+                        if not any(n in f for n in noise)})
+        if not files:
+            return ""
+        parts = ["\n\n---\nФайлы результата:\n" + "\n".join(f"- {f}" for f in files)]
+        code = [f for f in files if f.endswith((".py", ".md", ".txt", ".json", ".toml"))][:4]
+        for f in code:
+            try:
+                text = (self.store.workspace / f).read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if len(text) <= 20000:
+                lang = "python" if f.endswith(".py") else ""
+                parts.append(f"\n### {f}\n```{lang}\n{text}\n```")
+        return "\n".join(parts)
 
     def _partial_results(self) -> str:
         done = [t for t in self._tasks().values() if t["status"] == "done" and t["id"] != "goal"]
