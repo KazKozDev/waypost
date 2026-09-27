@@ -38,7 +38,7 @@ class WorkspaceTools:
 
     def describe(self, read_only: bool = False) -> str:
         tools = {
-            "list_files": {"path": "relative directory, default ."},
+            "list_files": {"path": "directory; default: your own output directory ('/' lists the workspace)"},
             "read_file": {"path": "relative UTF-8 file", "offset": "optional character offset"},
             "write_file": {"path": "relative filename inside your output directory", "content": "UTF-8 text"},
         }
@@ -54,13 +54,30 @@ class WorkspaceTools:
         return json.dumps({"tools": tools, "your_output_directory": str(self.output.relative_to(self.root)),
                            "read_limit_chars": 20000, "write_limit_chars": 200000})
 
+    def _resolve(self, name: str) -> Path:
+        """A path as the agent means it. write_file("x.py") lands in the
+        agent's own directory, so read_file("x.py") must find it there: a
+        live run looped for 20 calls reading and listing a file it had just
+        written, because reads resolved from the workspace root."""
+        own = (self.output / name).resolve()
+        if name not in ("", ".") and own.is_relative_to(self.root) and own.exists():
+            return own
+        return self._path(name)
+
     def execute(self, name: str, arguments: dict, timeout: float = 30) -> str:
         if name == "list_files":
-            path = self._path(arguments.get("path", "."))
-            return json.dumps([str(p.relative_to(self.root)) + ("/" if p.is_dir() else "")
-                               for p in sorted(path.iterdir())][:500])
+            requested = arguments.get("path")
+            # Default: your own directory — that is what you are working in.
+            path = (self.output if requested in (None, "", ".") else
+                    self.root if requested == "/" else self._resolve(requested))
+            if not path.is_dir():
+                raise ValueError(f"Not a directory: {requested}")
+            entries = [p for p in sorted(path.iterdir()) if not (path == self.root and p.name.startswith("."))]
+            return json.dumps({"directory": str(path.relative_to(self.root)) if path != self.root else ".",
+                               "entries": [str(p.relative_to(self.root)) + ("/" if p.is_dir() else "")
+                                           for p in entries][:500]})
         if name == "read_file":
-            path = self._path(arguments["path"])
+            path = self._resolve(arguments["path"])
             if not path.exists():
                 raise ValueError(f"File not found: {arguments['path']} — call list_files to see what exists")
             if not path.is_file():

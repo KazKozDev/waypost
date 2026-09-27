@@ -222,3 +222,14 @@ def test_the_result_carries_the_product_files(tmp_path):
     assert state["status"] == "completed"
     assert "Файлы результата" in state["draft"] and "artifacts/t/goal/1/snake.py" in state["draft"]
     assert "print('snake')" in state["draft"]
+
+
+def test_an_agent_reads_back_what_it_wrote_by_the_same_name(tmp_path):
+    from waypost.swarm.tools import WorkspaceTools
+    t = WorkspaceTools(tmp_path, "artifacts/t/goal/1")
+    t.execute("write_file", {"path": "snake.py", "content": "x"})
+    assert json.loads(t.execute("read_file", {"path": "snake.py"}))["content"] == "x"
+    own = json.loads(t.execute("list_files", {}))
+    assert own["entries"] == ["artifacts/t/goal/1/snake.py"]
+    whole = json.loads(t.execute("list_files", {"path": "/"}))
+    assert whole["entries"] == ["artifacts/"]  # service dirs hidden
