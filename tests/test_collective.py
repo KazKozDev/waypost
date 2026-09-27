@@ -671,3 +671,16 @@ def test_record_keys_in_task_ids_are_normalized(tmp_path):
     review = Review.model_validate(_normalize_task_ids(raw))
     assert [t.id for t in review.repair.tasks] == ["comment_code", "write_readme"]
     assert review.repair.tasks[1].depends_on == ["comment_code"]
+
+
+def test_probe_dead_models_do_not_take_ladder_rungs(tmp_path):
+    alive, dead = _offering("gemma-27b", 0.5), _offering("llama-70b", 0.99)
+    dead.dead_streak = 1
+    ledger = Ledger(str(tmp_path / "r.db"))
+    for o in (alive, dead):
+        ledger.register(o)
+    router = Router(Registry([alive, dead]), ledger, CircuitBreaker(), stochastic=False)
+    req = ChatRequest(messages=[ChatMessage(role="user", content="hi")])
+    assert [c.offering.model_id for c in router.plan(req, classify_l0(req))] == ["gemma-27b"]
+    alive.dead_streak = 1  # nothing alive: the dead are tried rather than refusing
+    assert router.plan(req, classify_l0(req))

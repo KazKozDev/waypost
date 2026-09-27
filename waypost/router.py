@@ -209,8 +209,14 @@ class Router:
         req: ChatRequest,
         p: RequestProfile,
         quality_floor: float = 0.0,
+        allow_dead: bool = False,
     ) -> bool:
         if not o.usable:
+            return False
+        # The last probe found it dead (402, 404, auth): quarantine only
+        # comes after a second dead probe a day later, and until then it
+        # took ladder rungs from live models on every request.
+        if o.dead_streak and not o.is_local and not allow_dead:
             return False
         if self.free_only and not o.free:
             return False
@@ -546,11 +552,11 @@ class Router:
         quality_floor: float = 0.0,
         prefix: str | None = None,
     ) -> list[Candidate]:
-        def survivors(floor: float) -> list[Candidate]:
+        def survivors(floor: float, allow_dead: bool = False) -> list[Candidate]:
             return [
                 self._score(o, req, p, prefix)
                 for o in self.registry.all()
-                if self._passes(o, req, p, floor)
+                if self._passes(o, req, p, floor, allow_dead=allow_dead)
                 and (min_tier is None or TIER_ORDER[o.tier] >= TIER_ORDER[min_tier])
             ]
 
@@ -566,6 +572,9 @@ class Router:
             # The quality floor is a preference, not a ban: if nobody
             # fits it, a weak candidate is better than a refusal.
             cands = survivors(0.0)
+        if not cands:
+            # Nothing alive: a probe-dead model may have come back.
+            cands = survivors(0.0, allow_dead=True)
         avoid = set(req.avoid_families or ())
 
         def order(c: Candidate) -> tuple[bool, float]:
