@@ -767,7 +767,7 @@ class SwarmEngine(StigmergyMixin, CoordinatorMixin):
         return members
 
     def _structured_answer(self, role, instruction, context, schema, avoid_families=None,
-                           max_failures=3):
+                           max_failures=3, tier_hint=None):
         prompt = context
         system = RULES + instruction + "\nSCHEMA:\n" + json.dumps(schema.model_json_schema())
         attempt = 0
@@ -778,9 +778,8 @@ class SwarmEngine(StigmergyMixin, CoordinatorMixin):
             if self.store.control().get("messages"):
                 raise ReplanRequested("User correction pending")
             try:
-                raw = (self.backend.ask(role, system, prompt, schema=schema.model_json_schema(),
-                                        avoid_families=avoid_families) if avoid_families else
-                       self.backend.ask(role, system, prompt, schema=schema.model_json_schema()))
+                extra = {k: v for k, v in (("avoid_families", avoid_families), ("tier_hint", tier_hint)) if v}
+                raw = self.backend.ask(role, system, prompt, schema=schema.model_json_schema(), **extra)
             except (RunInterrupted, BudgetExceeded, ReplanRequested):
                 raise
             except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
@@ -954,7 +953,7 @@ class SwarmEngine(StigmergyMixin, CoordinatorMixin):
                     raise next((e for e in errors if isinstance(e, BudgetExceeded)), errors[0])
 
     def _worker(self, role, instruction, context, key, read_only=False, avoid_families=None,
-                max_failures=3):
+                max_failures=3, tier_hint=None):
         with self.budget.lock:
             record = self.state["records"].setdefault(key, {"history": [], "steps": 0, "status": "running"})
             if record["status"] == "done":
@@ -983,7 +982,7 @@ class SwarmEngine(StigmergyMixin, CoordinatorMixin):
             action, family = self._structured_answer(key, system_instruction,
                                                      context + "\nOBSERVATIONS:\n" + history, Action,
                                                      avoid_families=avoid_families,
-                                                     max_failures=max_failures)
+                                                     max_failures=max_failures, tier_hint=tier_hint)
             with self.budget.lock:
                 record["steps"] += 1
                 record["history"].append({"action": action.model_dump()})

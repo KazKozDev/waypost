@@ -49,8 +49,10 @@ class Script:
         self.budget = budget
         return self
 
-    def ask(self, role, system, prompt, schema=None, avoid_families=None):
+    def ask(self, role, system, prompt, schema=None, avoid_families=None, tier_hint=None):
         self.calls.append(role)
+        self.tiers = getattr(self, "tiers", {})
+        self.tiers[role] = tier_hint
         self.prompts.setdefault(role, []).append(prompt)
         if not self.script.get(role):
             raise KeyError(role)
@@ -233,3 +235,30 @@ def test_an_agent_reads_back_what_it_wrote_by_the_same_name(tmp_path):
     assert own["entries"] == ["artifacts/t/goal/1/snake.py"]
     whole = json.loads(t.execute("list_files", {"path": "/"}))
     assert whole["entries"] == ["artifacts/"]  # service dirs hidden
+
+
+def test_first_attempt_asks_for_a_mid_model_a_retry_for_a_large_one(tmp_path):
+    state, backend, events = run(tmp_path, {
+        "t:goal:1": [write("g.py"), final("not run")], "t:goal:2": [RUN, final("ran")]})
+    assert backend.tiers["t:goal:1"] == "M" and backend.tiers["t:goal:2"] == "L"
+
+
+def test_tier_hint_widens_the_pool_and_is_not_sent_upstream(tmp_path):
+    from waypost.breaker import CircuitBreaker
+    from waypost.classify import classify_l0
+    from waypost.ledger import Ledger
+    from waypost.registry import Offering, Registry
+    from waypost.router import Router
+    from waypost.schemas import Capability, ChatMessage, ChatRequest, Tier
+    mid = Offering(provider="m", model_id="gemma-27b", base_url="http://m/v1", tier=Tier.M,
+                   caps={Capability.JSON}, quality_score=0.8, limit_rpd=100)
+    big = Offering(provider="b", model_id="llama-405b", base_url="http://b/v1", tier=Tier.L,
+                   caps={Capability.JSON}, quality_score=0.8, limit_rpd=100)
+    ledger = Ledger(str(tmp_path / "r.db"))
+    for o in (mid, big):
+        ledger.register(o)
+    router = Router(Registry([mid, big]), ledger, CircuitBreaker(), stochastic=False)
+    req = ChatRequest(messages=[ChatMessage(role="user", content="x " * 3000)], tier_hint="M")
+    profile = classify_l0(req)
+    assert router.plan(req, profile)[0].offering.model_id == "gemma-27b"
+    assert "tier_hint" not in req.provider_payload("m")

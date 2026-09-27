@@ -562,7 +562,11 @@ class Router:
 
         # Pre-empt a likely escalation: raising the floor before the call
         # is cheaper than the cheap model plus the escalation after it.
-        if min_tier is None:
+        if req.tier_hint:
+            # The caller knows the step: score against that tier, and do
+            # not pre-empt it upward from similar-looking prompts.
+            p = p.model_copy(update={"tier": Tier(req.tier_hint)})
+        elif min_tier is None:
             predicted = self.predicted_tier(p)
             if TIER_ORDER[predicted] > TIER_ORDER[p.tier]:
                 min_tier = predicted

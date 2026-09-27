@@ -219,9 +219,13 @@ class StigmergyMixin:
         self.store.event("task_claimed", task=task["id"], attempt=task["attempts"], work_kind=task["kind"])
         avoid = self._poor_families(f"swarm-{task['kind']}") + task.get("tried_families", [])
         try:
+            # Whoever is near tries first; the heavy load goes to the strong:
+            # a first attempt may run on a mid-size model, a retry after a
+            # failure asks for a large one.
             answer = self._worker(f"swarm agent ({task['kind']})", AGENT_RULES,
                                   json.dumps(self._board_brief(task), ensure_ascii=False), key,
-                                  avoid_families=avoid or None)
+                                  avoid_families=avoid or None,
+                                  tier_hint="M" if task["attempts"] == 1 else "L")
         except Exception as exc:  # noqa: BLE001
             if type(exc).__name__ in _PASSTHROUGH:
                 task["status"] = "needed"

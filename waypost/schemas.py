@@ -69,6 +69,10 @@ class ChatRequest(BaseModel):
     # They move to the end of the ladder — not out of it, so a caller asking
     # for a second opinion still gets an answer when only one family lives.
     avoid_families: list[str] | None = None
+    # Router extension: the tier the caller knows it needs. A long prompt
+    # reads as "large model" to the classifier; a swarm agent's first try
+    # at a routine step does not need one, and a retry after a failure does.
+    tier_hint: Literal["S", "M", "L"] | None = None
 
     def provider_payload(self, model_id: str) -> dict[str, Any]:
         """Provider request body: router extensions stripped out."""
@@ -83,6 +87,7 @@ class ChatRequest(BaseModel):
             "idempotency_key",
             "output_schema",
             "avoid_families",
+            "tier_hint",
             "model",
             "stream",
             "max_completion_tokens",

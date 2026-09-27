@@ -94,11 +94,13 @@ class Answer(str):
 class WaypostLLM:
     def __init__(self, config: SwarmConfig, budget: Budget, store: RunStore,
                  session: str, system: str, client: httpx.Client | None = None,
-                 schema: dict | None = None, avoid_families: list[str] | None = None):
+                 schema: dict | None = None, avoid_families: list[str] | None = None,
+                 tier_hint: str | None = None):
         self.config, self.budget, self.store = config, budget, store
         self.session, self.system, self.client = session, system, client
         self.schema = schema
         self.avoid_families = avoid_families
+        self.tier_hint = tier_hint
         self.last_family: str | None = None
         self.last_response: str | None = None
         self.last_error: Exception | None = None
@@ -148,6 +150,8 @@ class WaypostLLM:
             payload["output_schema"] = self.schema
         if self.avoid_families:
             payload["avoid_families"] = self.avoid_families
+        if self.tier_hint:
+            payload["tier_hint"] = self.tier_hint
         if self.config.privacy == "strict":
             payload["privacy"] = "strict"
         try:
@@ -233,10 +237,10 @@ class SwarmsBackend:
         self.config, self.budget, self.store = config, budget, store
 
     def ask(self, role: str, system: str, prompt: str, schema: dict | None = None,
-            avoid_families: list[str] | None = None) -> str:
+            avoid_families: list[str] | None = None, tier_hint: str | None = None) -> str:
         llm = WaypostLLM(self.config, self.budget, self.store,
                          f"{self.store.directory.name}:{role}", system, schema=schema,
-                         avoid_families=avoid_families)
+                         avoid_families=avoid_families, tier_hint=tier_hint)
         agent = self.agent_class(
             agent_name=role, system_prompt=system, llm=llm,
             model_name="openai/auto", max_loops=1, retry_attempts=1,
