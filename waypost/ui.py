@@ -465,6 +465,7 @@ function eventView(e){
   if(kind==='verified')return addLog(e.time,'Проверено · '+e.task,'независимый агент подтвердил ('+(e.work_kind||'')+')');
   if(kind==='verify_failed')return addBubble('Проверка не пройдена · '+e.task,(e.problems||[]).map(p=>'- '+p).join('\n'),'monitor');
   if(kind==='verdict_without_evidence')return addLog(e.time,'Вердикт без доказательств · '+e.task,'отброшен — проверка заново');
+  if(kind==='answer_cut_off')return addLog(e.time,'Ответ оборван · '+e.task,'назад: нужен полный ответ');
   if(kind==='answer_not_readable')return addLog(e.time,'Ответ в JSON · '+e.task,'назад: нужен читаемый текст');
   if(kind==='verify_unavailable')return addLog(e.time,'Проверка недоступна · '+e.task,e.error||'');
   if(kind==='dead_end_suspected')return addLog(e.time,'Подозрение на тупик · '+e.task,(e.reason||'')+' — проверит другой агент');

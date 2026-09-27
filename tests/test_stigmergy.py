@@ -390,3 +390,31 @@ def test_a_json_answer_goes_back_for_readable_text(tmp_path):
         "v:goal:2": [final("VERIFIED")]})
     assert state["draft"].startswith("День 1") and any(e["event"] == "answer_not_readable" for e in events)
     assert "readable text" in backend.prompts["t:goal:2"][0]
+
+
+def test_a_cut_off_answer_always_goes_back(tmp_path):
+    from waypost.swarm.stigmergy import _looks_cut_off
+    assert _looks_cut_off('Эрмитаж ≈ 700 ₽ (по информации)【{"id":0,')
+    assert _looks_cut_off("```python\nprint(1)\n") and _looks_cut_off("Day 1:")
+    assert not _looks_cut_off("День 1: Эрмитаж. Итого 18 000 ₽.")
+    state, backend, events = run(tmp_path, {
+        "t:goal:1": [final_kind('План: Эрмитаж ≈ 700 ₽【{"id":0,', "write")],
+        "t:goal:2": [final_kind("План: Эрмитаж 700 ₽. Итого 18 000 ₽.", "write")],
+        "v:goal:2": [final("VERIFIED")]})
+    assert state["draft"].startswith("План: Эрмитаж 700") and any(e["event"] == "answer_cut_off" for e in events)
+
+
+def test_incomplete_work_is_not_delivered_after_two_checks_if_attempts_remain(tmp_path):
+    state, backend, events = run(tmp_path, {
+        "t:goal:1": [final_kind("Day 1 plan only.", "write")],
+        "v:goal:1": [final("PROBLEMS: the result is incomplete, day 2 is missing")],
+        "t:goal:2": [final_kind("Day 1 and part of day 2.", "write")],
+        "v:goal:2": [final("PROBLEMS: incomplete, day 2 has no evening")],
+        "t:goal:3": [final_kind("Both days complete.", "write")],
+        "v:goal:3": [final("VERIFIED")]})
+    assert state["draft"] == "Both days complete." and state["tasks"]["goal"]["verified"] is True
+
+
+def test_the_checker_is_told_to_list_the_tasks_requirements():
+    from waypost.swarm.stigmergy import VERIFY_RULES
+    assert "list every requirement" in VERIFY_RULES and "how many points" in VERIFY_RULES

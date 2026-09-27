@@ -64,12 +64,25 @@ VERIFY_HOW = {
 VERIFY_RULES = (
     "You are an independent checker in an agent swarm. You did not write this result. Check it with "
     "outside evidence, not with trust: USE YOUR TOOLS before any verdict — a verdict without evidence you "
-    "gathered yourself is thrown away. {how} Also: the result must be readable text in the same language "
-    "as the task.\nFinish with kind=final and answer starting with the word VERIFIED if it holds up, or "
+    "gathered yourself is thrown away. FIRST list every requirement the task states — how many points or "
+    "items, length, language, format, what must be included — and check each one separately; any unmet "
+    "requirement is a problem, as is a result that is cut off or incomplete. {how}\nFinish with kind=final and answer starting with the word VERIFIED if it holds up, or "
     "with PROBLEMS: followed by one problem per line."
 )
 # Kinds whose check is meaningless without gathered evidence.
 EVIDENCE_KINDS = ("research", "analyze")
+
+
+def _looks_cut_off(text: str) -> bool:
+    """An answer that stops mid-way: a model's internal citation markers
+    leaked into it, an unclosed code block, or a last line ending on a
+    comma, colon or open bracket."""
+    text = text.rstrip()
+    if not text:
+        return True
+    if "【" in text or "†" in text or text.count("```") % 2:
+        return True
+    return text[-1] in ",:;([{«\"'—-"
 
 
 def _looks_like_json(text: str) -> bool:
@@ -313,6 +326,13 @@ class StigmergyMixin:
     def _on_final(self, task, outcome, key, record):
         files = self._artifacts_for(key)
         answer = str(outcome.get("answer", ""))
+        if _looks_cut_off(answer) and task["attempts"] < MAX_ATTEMPTS:
+            # Half an answer is not an answer, whatever a checker would say.
+            task["notes"].append("Your answer was cut off or contained internal markers (like 【 or †). Give "
+                                 "the COMPLETE result as clean readable text.")
+            task["status"] = "needed"
+            self.store.event("answer_cut_off", task=task["id"])
+            return
         if _looks_like_json(answer) and task["attempts"] < MAX_ATTEMPTS:
             # A person reads the result: a JSON dump is not an answer.
             task["notes"].append("Your answer was JSON. Give the result as readable text for a person, in the "
@@ -340,7 +360,9 @@ class StigmergyMixin:
                 if not ok:
                     task["verify_fails"] = task.get("verify_fails", 0) + 1
                     self.store.event("verify_failed", task=task["id"], work_kind=kind, problems=problems[:6])
-                    if task["verify_fails"] < MAX_VERIFY_FAILS:
+                    incomplete = any(w in " ".join(problems).lower() for w in
+                                     ("truncat", "incomplete", "cut off", "обрез", "не законч", "неполн"))
+                    if task["verify_fails"] < MAX_VERIFY_FAILS or (incomplete and task["attempts"] < MAX_ATTEMPTS):
                         task["notes"].append("An independent checker found problems — fix them:\n- "
                                              + "\n- ".join(problems[:8]))
                         task["status"] = "needed"
