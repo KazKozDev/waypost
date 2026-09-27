@@ -541,3 +541,11 @@ def test_local_ollama_does_not_think_unless_asked():
     assert "reasoning_effort" not in build_payload(
         ChatRequest(messages=msgs, thinking_mode=True), local)
     assert "reasoning_effort" not in build_payload(ChatRequest(messages=msgs), cloud)
+
+
+def test_payment_required_mentioning_quota_is_a_long_block():
+    from waypost.providers.openai_compat import Verdict, classify_error
+    body = ('{"message":"Payment required to access this resource. Visit your billing tab.",'
+            '"type":"payment_required_error","param":"quota","code":"payment_required"}')
+    err = classify_error(402, body)
+    assert err.verdict is Verdict.SWITCH and err.retry_after_s >= 3600

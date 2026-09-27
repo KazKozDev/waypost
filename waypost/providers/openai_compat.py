@@ -76,15 +76,17 @@ def classify_error(
     retry_after = parse_retry_after(headers.get("retry-after") if headers else None)
 
     low = body.lower()
+    if status == 402:
+        # Unpaid model or account (ollama.com: "not included in your free
+        # usage"). A property of this offering, not of the request — it
+        # used to fall through to FATAL and stop the whole ladder. Checked
+        # before the words below: cerebras's 402 body says "quota", which
+        # made it a one-minute rate limit retried on every request.
+        return ProviderError(Verdict.SWITCH, status, body[:300], 86400.0)
     if status == 429 or "rate limit" in low or "quota" in low:
         return ProviderError(Verdict.SWITCH, status, body[:300], retry_after)
     if status in (401, 403):
         return ProviderError(Verdict.SWITCH, status, "auth failed", 3600.0)
-    if status == 402:
-        # Unpaid model or account (ollama.com: "not included in your free
-        # usage"). A property of this offering, not of the request — it
-        # used to fall through to FATAL and stop the whole ladder.
-        return ProviderError(Verdict.SWITCH, status, body[:300], 86400.0)
     if (
         status in (404, 410)
         or "end of life" in low
