@@ -165,6 +165,8 @@ class WorkspaceTools:
         self.lib.mkdir(parents=True, exist_ok=True)
         # pip reads PIP_* from the environment even under -I: installs land in
         # the shared swarm library, caches in scratch — never in the result.
+        # Headless: a game or GUI must be runnable to be verified by running.
+        env.update(SDL_VIDEODRIVER="dummy", SDL_AUDIODRIVER="dummy", MPLBACKEND="Agg")
         env.update(HOME=str(self.scratch), TMPDIR=str(self.scratch), PIP_TARGET=str(self.lib),
                    PIP_CACHE_DIR=str(self.scratch / "pip-cache"), PIP_DISABLE_PIP_VERSION_CHECK="1",
                    SWARM_LIB=str(self.lib))

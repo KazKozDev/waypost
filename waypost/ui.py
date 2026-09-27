@@ -462,6 +462,7 @@ function eventView(e){
   if(kind==='mark_done')return addLog(e.time,'Сделано · '+e.task,(e.verified?'✓ проверено запуском':'')+(e.files?.length?' · '+e.files.join(', '):''));
   if(kind==='task_split')return addLog(e.time,'Разложил · '+e.task,'подзадачи: '+(e.children||[]).join(', '));
   if(kind==='task_dead_end')return addLog(e.time,'Тупик · '+e.task,e.reason||'');
+  if(kind==='dead_end_suspected')return addLog(e.time,'Подозрение на тупик · '+e.task,(e.reason||'')+' — проверит другой агент');
   if(kind==='task_reused')return addLog(e.time,'Уже сделано · '+e.task,'взят результат '+e.twin);
   if(kind==='task_unverified')return addLog(e.time,'Не проверено · '+e.task,'код не запускали — назад на доску');
   if(kind==='task_retry')return addLog(e.time,'Повтор · '+e.task,e.why||'');

@@ -34,8 +34,8 @@ AGENT_RULES = (
     "- kind=split: ONLY after a previous attempt showed the task is too big for one agent (see your "
     "notes): 2-6 subtasks (id, goal, kind of build/check/research/write/decide, depends_on). Your first "
     "attempt must do the task itself — one agent writes a whole small program in one go.\n"
-    "- kind=dead_end: impossible in this environment (no network, no access, missing tool); answer = "
-    "the exact reason. Do not retry impossible things — the reason is a valid result.\n"
+    "- kind=dead_end: truly impossible in this environment; answer = the exact reason. A missing Python "
+    "package is NOT a dead end: install it with pip first. Do not retry impossible things.\n"
     "- kind=conflict: you are integrating subtask results and two of them contradict; between = "
     "their two ids, answer = what they disagree on.\n"
     "If you have subtask results, integrate them into your result instead of redoing them."
@@ -285,7 +285,20 @@ class StigmergyMixin:
         self._note_kind(task, success=True)
 
     def _on_dead_end(self, task, outcome, key, record):
-        self._mark_dead(task, str(outcome.get("answer", "")))
+        """One ant's alarm does not stop the colony: a dead end is only a
+        suspicion until a second agent, on another model, confirms it. A
+        live run gave up a snake game because pygame was not installed —
+        which pip fixes in seconds."""
+        reason = str(outcome.get("answer", ""))
+        if task.get("suspected_dead"):
+            self._mark_dead(task, reason)
+            return
+        task["suspected_dead"] = reason
+        task["notes"].append(f"Another agent reported this impossible: {reason} — Check it yourself before "
+                             "agreeing: install missing packages with pip, try another way. Confirm dead_end "
+                             "only if it truly cannot be done here; otherwise do the task.")
+        task["status"] = "needed"
+        self.store.event("dead_end_suspected", task=task["id"], reason=reason[:400])
 
     def _on_split(self, task, outcome, key, record):
         subtasks = outcome.get("subtasks") or []

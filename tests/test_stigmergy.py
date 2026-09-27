@@ -85,10 +85,21 @@ def test_a_simple_task_is_one_agent_and_one_call(tmp_path):
     assert state["calls"] == 1 and backend.calls == ["t:goal:1"]
 
 
-def test_an_impossibility_is_a_result_not_a_retry(tmp_path):
-    state, backend, events = run(tmp_path, {"t:goal:1": [dead("no DNS in this sandbox")]})
-    assert state["status"] == "completed" and state["calls"] == 1
-    assert "no DNS in this sandbox" in state["draft"]
+def test_an_impossibility_confirmed_by_a_second_agent_is_a_result(tmp_path):
+    state, backend, events = run(tmp_path, {"t:goal:1": [dead("no DNS in this sandbox")],
+                                            "t:goal:2": [dead("confirmed: no DNS")]})
+    assert state["status"] == "completed" and state["calls"] == 2
+    assert "confirmed: no DNS" in state["draft"]
+    assert "Check it yourself" in backend.prompts["t:goal:2"][0]
+
+
+def test_a_false_alarm_is_overturned_by_the_second_agent(tmp_path):
+    state, backend, events = run(tmp_path, {
+        "t:goal:1": [dead("pygame is not installed")],
+        "t:goal:2": [RUN, final("installed pygame with pip; game runs")]})
+    assert state["tasks"]["goal"]["status"] == "done"
+    assert state["draft"].startswith("installed pygame")
+    assert any(e["event"] == "dead_end_suspected" for e in events)
 
 
 def test_code_counts_as_done_only_after_it_ran(tmp_path):
@@ -132,7 +143,8 @@ def test_a_dead_end_scares_off_the_same_goal(tmp_path):
         {"id": "d", "goal": "report", "kind": "write", "depends_on": []}]}
     state, backend, events = run(tmp_path, {
         "t:goal:1": [first], "t:goal:2": [first],
-        "t:goal.a:1": [dead("no network")], "t:goal.b:1": [final("summary of nothing")],
+        "t:goal.a:1": [dead("no network")], "t:goal.a:2": [dead("no network, confirmed")],
+        "t:goal.b:1": [final("summary of nothing")],
         "t:goal:3": [again], "t:goal.d:1": [final("report")],
         "t:goal:4": [final("could not fetch: no network")]})
     assert state["tasks"]["goal.c"]["status"] == "dead_end"
