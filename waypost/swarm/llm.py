@@ -84,10 +84,12 @@ class Answer(str):
     """Model text that remembers which model family wrote it — the
     collective needs that to ask the next member someone else."""
     family: str | None = None
+    model_key: str | None = None
 
-    def __new__(cls, text: str, family: str | None = None):
+    def __new__(cls, text: str, family: str | None = None, model_key: str | None = None):
         value = super().__new__(cls, text)
         value.family = family
+        value.model_key = model_key
         return value
 
 
@@ -95,13 +97,15 @@ class WaypostLLM:
     def __init__(self, config: SwarmConfig, budget: Budget, store: RunStore,
                  session: str, system: str, client: httpx.Client | None = None,
                  schema: dict | None = None, avoid_families: list[str] | None = None,
-                 tier_hint: str | None = None):
+                 tier_hint: str | None = None, prefer_model: str | None = None):
         self.config, self.budget, self.store = config, budget, store
         self.session, self.system, self.client = session, system, client
         self.schema = schema
         self.avoid_families = avoid_families
         self.tier_hint = tier_hint
+        self.prefer_model = prefer_model
         self.last_family: str | None = None
+        self.last_key: str | None = None
         self.last_response: str | None = None
         self.last_error: Exception | None = None
 
@@ -152,6 +156,8 @@ class WaypostLLM:
             payload["avoid_families"] = self.avoid_families
         if self.tier_hint:
             payload["tier_hint"] = self.tier_hint
+        if self.prefer_model:
+            payload["prefer_model"] = self.prefer_model
         if self.config.privacy == "strict":
             payload["privacy"] = "strict"
         try:
@@ -214,8 +220,10 @@ class WaypostLLM:
         content = choice["message"].get("content")
         if not isinstance(content, str) or not content.strip():
             raise EmptyAnswer("Waypost returned no text")
-        model = data.get("router", {}).get("model")
+        router = data.get("router", {})
+        model = router.get("model")
         self.last_family = model_family(model) if model else None
+        self.last_key = f"{router['provider']}/{model}" if model and router.get("provider") else None
         self.store.event("llm_response", session=self.session,
                          router=data.get("router", {}), usage=data.get("usage", {}),
                          seconds=round(time.monotonic() - started, 1))
@@ -237,10 +245,11 @@ class SwarmsBackend:
         self.config, self.budget, self.store = config, budget, store
 
     def ask(self, role: str, system: str, prompt: str, schema: dict | None = None,
-            avoid_families: list[str] | None = None, tier_hint: str | None = None) -> str:
+            avoid_families: list[str] | None = None, tier_hint: str | None = None,
+            prefer_model: str | None = None) -> str:
         llm = WaypostLLM(self.config, self.budget, self.store,
                          f"{self.store.directory.name}:{role}", system, schema=schema,
-                         avoid_families=avoid_families, tier_hint=tier_hint)
+                         avoid_families=avoid_families, tier_hint=tier_hint, prefer_model=prefer_model)
         agent = self.agent_class(
             agent_name=role, system_prompt=system, llm=llm,
             model_name="openai/auto", max_loops=1, retry_attempts=1,
@@ -260,7 +269,7 @@ class SwarmsBackend:
             raise llm.last_error
         if llm.last_response is None:
             raise RuntimeError("Swarms did not invoke the Waypost adapter")
-        return Answer(llm.last_response, llm.last_family)
+        return Answer(llm.last_response, llm.last_family, llm.last_key)
 
 
 def parse_json(text: str) -> dict:

@@ -617,6 +617,11 @@ class Router:
             head = merged[:limit]
             if local_cands and not any(c.offering.is_local for c in head):
                 head = head[: max(0, limit - 1)] + local_cands[:1]
+        if req.prefer_model:
+            preferred = next((c for c in cands if c.offering.key == req.prefer_model), None)
+            if preferred is not None:
+                head = [preferred] + [c for c in head if c.offering.key != req.prefer_model]
+                head = head[:limit]
         return self._skip_doomed_first_rungs(head)
 
     def plan_escalated(

@@ -73,6 +73,10 @@ class ChatRequest(BaseModel):
     # reads as "large model" to the classifier; a swarm agent's first try
     # at a routine step does not need one, and a retry after a failure does.
     tier_hint: Literal["S", "M", "L"] | None = None
+    # Router extension: the offering (provider/model) that has been doing
+    # this caller's work. Put first while it is alive, so an agent keeps one
+    # head across its steps instead of a different model every step.
+    prefer_model: str | None = None
 
     def provider_payload(self, model_id: str) -> dict[str, Any]:
         """Provider request body: router extensions stripped out."""
@@ -88,6 +92,7 @@ class ChatRequest(BaseModel):
             "output_schema",
             "avoid_families",
             "tier_hint",
+            "prefer_model",
             "model",
             "stream",
             "max_completion_tokens",

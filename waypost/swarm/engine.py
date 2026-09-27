@@ -777,7 +777,7 @@ class SwarmEngine(StigmergyMixin, CoordinatorMixin):
         return members
 
     def _structured_answer(self, role, instruction, context, schema, avoid_families=None,
-                           max_failures=3, tier_hint=None):
+                           max_failures=3, tier_hint=None, prefer_model=None, meta=None):
         prompt = context
         system = RULES + instruction + "\nSCHEMA:\n" + json.dumps(schema.model_json_schema())
         attempt = 0
@@ -788,7 +788,8 @@ class SwarmEngine(StigmergyMixin, CoordinatorMixin):
             if self.store.control().get("messages"):
                 raise ReplanRequested("User correction pending")
             try:
-                extra = {k: v for k, v in (("avoid_families", avoid_families), ("tier_hint", tier_hint)) if v}
+                extra = {k: v for k, v in (("avoid_families", avoid_families), ("tier_hint", tier_hint),
+                                           ("prefer_model", prefer_model)) if v}
                 raw = self.backend.ask(role, system, prompt, schema=schema.model_json_schema(), **extra)
             except (RunInterrupted, BudgetExceeded, ReplanRequested):
                 raise
@@ -820,6 +821,8 @@ class SwarmEngine(StigmergyMixin, CoordinatorMixin):
                     raise ValueError("Too many tasks for configured max_tasks")
                 family = getattr(raw, "family", None)
                 self._note_family(role, family)
+                if meta is not None:
+                    meta["model_key"] = getattr(raw, "model_key", None)
                 return value, family
             except (ValueError, ValidationError) as exc:
                 attempt += 1
@@ -989,10 +992,16 @@ class SwarmEngine(StigmergyMixin, CoordinatorMixin):
         while self.config.max_steps is None or record["steps"] < self.config.max_steps:
             self.budget.check()
             history = json.dumps(_compact_history(record["history"][-8:]), ensure_ascii=False)
+            # One head per agent: the model that has been doing this attempt
+            # is asked first again, while it is alive.
+            meta: dict = {}
             action, family = self._structured_answer(key, system_instruction,
                                                      context + "\nOBSERVATIONS:\n" + history, Action,
                                                      avoid_families=avoid_families,
-                                                     max_failures=max_failures, tier_hint=tier_hint)
+                                                     max_failures=max_failures, tier_hint=tier_hint,
+                                                     prefer_model=record.get("model_key"), meta=meta)
+            if meta.get("model_key"):
+                record["model_key"] = meta["model_key"]
             with self.budget.lock:
                 record["steps"] += 1
                 record["history"].append({"action": action.model_dump()})

@@ -49,10 +49,13 @@ class Script:
         self.budget = budget
         return self
 
-    def ask(self, role, system, prompt, schema=None, avoid_families=None, tier_hint=None):
+    def ask(self, role, system, prompt, schema=None, avoid_families=None, tier_hint=None,
+            prefer_model=None):
         self.calls.append(role)
         self.tiers = getattr(self, "tiers", {})
         self.tiers[role] = tier_hint
+        self.preferred = getattr(self, "preferred", [])
+        self.preferred.append((role, prefer_model))
         self.prompts.setdefault(role, []).append(prompt)
         if not self.script.get(role):
             raise KeyError(role)
@@ -61,7 +64,8 @@ class Script:
             raise value
         self.budget.reserve()
         suffix = role[role.index("#"):] if "#" in role else ""
-        return Answer(json.dumps(value), self.FAMILIES.get(suffix))
+        family = self.FAMILIES.get(suffix)
+        return Answer(json.dumps(value), family, f"prov/{family}-model")
 
 
 @pytest.fixture(autouse=True)
@@ -447,3 +451,32 @@ def test_giving_up_is_reported_as_unfinished_with_the_files(tmp_path):
         "t:goal:2": stuck, "t:goal:3": stuck})
     assert state["draft"].startswith("Не доделано за 3 попытки")
     assert "Невозможно" not in state["draft"] and "ttt.py" in state["draft"]
+
+
+def test_an_agent_keeps_one_model_across_its_steps(tmp_path):
+    state, backend, events = run(tmp_path, {
+        "t:goal:1": [write("g.py"), RUN, final_kind("ran: 1", "build")]})
+    steps = [p for r, p in backend.preferred if r == "t:goal:1"]
+    assert steps == [None, "prov/llama-model", "prov/llama-model"]
+
+
+def test_router_puts_the_preferred_model_first_while_alive(tmp_path):
+    from waypost.breaker import CircuitBreaker
+    from waypost.classify import classify_l0
+    from waypost.ledger import Ledger
+    from waypost.registry import Offering, Registry
+    from waypost.router import Router
+    from waypost.schemas import Capability, ChatMessage, ChatRequest
+    best = Offering(provider="a", model_id="big", base_url="http://a/v1", caps={Capability.JSON},
+                    quality_score=0.95, limit_rpd=100)
+    mine = Offering(provider="b", model_id="small", base_url="http://b/v1", caps={Capability.JSON},
+                    quality_score=0.5, limit_rpd=100)
+    ledger = Ledger(str(tmp_path / "r.db"))
+    for o in (best, mine):
+        ledger.register(o)
+    router = Router(Registry([best, mine]), ledger, CircuitBreaker(), stochastic=False)
+    req = ChatRequest(messages=[ChatMessage(role="user", content="hi")], prefer_model="b/small")
+    assert [c.offering.key for c in router.plan(req, classify_l0(req))] == ["b/small", "a/big"]
+    mine.dead_streak = 1  # not alive: no longer first
+    assert router.plan(req, classify_l0(req))[0].offering.key == "a/big"
+    assert "prefer_model" not in req.provider_payload("m")
