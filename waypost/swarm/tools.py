@@ -5,14 +5,59 @@ home outside the run workspace, never this machine's own services
 execution."""
 from __future__ import annotations
 
+from html.parser import HTMLParser
+import ipaddress
 import json
 import os
 from pathlib import Path
+import re
+import socket
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
+
+
+class _TextExtractor(HTMLParser):
+    """Readable text of a web page: no scripts, styles or navigation noise."""
+    SKIP = {"script", "style", "noscript", "svg", "head", "nav", "footer"}
+
+    def __init__(self):
+        super().__init__()
+        self.parts, self.depth = [], 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP:
+            self.depth += 1
+        elif tag in ("p", "br", "li", "h1", "h2", "h3", "h4", "tr", "div"):
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP and self.depth:
+            self.depth -= 1
+
+    def handle_data(self, data):
+        if not self.depth and data.strip():
+            self.parts.append(data.strip() + " ")
+
+    def text(self) -> str:
+        return re.sub(r"\n\s*\n+", "\n\n", "".join(self.parts)).strip()
+
+
+def _public_host(host: str) -> None:
+    """Refuse this machine and private networks, after DNS: a public name
+    can resolve to 127.0.0.1 or a home router."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise ValueError(f"Cannot resolve {host}: {exc}") from exc
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0].split("%")[0])
+        if (address.is_private or address.is_loopback or address.is_link_local or address.is_multicast
+                or address.is_reserved or address.is_unspecified):
+            raise ValueError(f"{host} resolves to a local/private address ({address}); not allowed")
 
 
 class WorkspaceTools:
@@ -49,6 +94,10 @@ class WorkspaceTools:
                                                "to the swarm's shared library and is importable at once by "
                                                "every agent" if self.allow_network
                                                else "no network")}
+        if self.allow_network:
+            tools["web_search"] = {"query": "search the web; returns titles, URLs and snippets"}
+            tools["fetch_url"] = {"url": "http(s) page to read as text (public sites only)",
+                                  "offset": "optional character offset for long pages"}
         if read_only:
             tools.pop("write_file")
         return json.dumps({"tools": tools, "your_output_directory": str(self.output.relative_to(self.root)),
@@ -119,9 +168,78 @@ class WorkspaceTools:
             if others:
                 result["note"] = "other agents have a file with this name: " + ", ".join(others)
             return json.dumps(result)
+        if name == "web_search" and self.allow_network:
+            return self._web_search(str(arguments.get("query", "")))
+        if name == "fetch_url" and self.allow_network:
+            return self._fetch_url(str(arguments.get("url", "")), int(arguments.get("offset", 0) or 0))
         if name == "run_python" and self.allow_python:
             return self._python(arguments["code"], min(timeout, 30))
         raise ValueError(f"Unknown or disabled tool: {name}")
+
+    SEARCH_URL = "https://html.duckduckgo.com/html/"
+    FETCH_LIMIT = 2_000_000
+    _http: "httpx.Client | None" = None
+
+    def _client(self):
+        import httpx
+        if WorkspaceTools._http is None:
+            WorkspaceTools._http = httpx.Client(
+                timeout=20, follow_redirects=False, trust_env=False,
+                headers={"User-Agent": "Mozilla/5.0 (Macintosh) waypost-swarm/1.0"})
+        return WorkspaceTools._http
+
+    def _get(self, url: str):
+        """GET with every hop checked: redirects must stay on public hosts."""
+        for _ in range(6):
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                raise ValueError("Only http(s) URLs are allowed")
+            _public_host(parsed.hostname)
+            response = self._client().get(url)
+            if response.is_redirect and response.headers.get("location"):
+                url = urljoin(url, response.headers["location"])
+                continue
+            return url, response
+        raise ValueError("Too many redirects")
+
+    def _web_search(self, query: str) -> str:
+        if not query.strip():
+            raise ValueError("web_search needs a query")
+        _public_host(urlparse(self.SEARCH_URL).hostname)
+        response = self._client().post(self.SEARCH_URL, data={"q": query})
+        results = []
+        page = response.text
+        anchors = list(re.finditer(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', page, re.S))
+        for i, match in enumerate(anchors[:8]):
+            href = match.group(1)
+            if "uddg=" in href:
+                href = unquote(parse_qs(urlparse(href).query).get("uddg", [href])[0])
+            # The snippet belongs to this result: between it and the next one.
+            end = anchors[i + 1].start() if i + 1 < len(anchors) else len(page)
+            snippet = re.search(r'class="result__snippet"[^>]*>(.*?)</a>', page[match.end():end], re.S)
+
+            def strip(s):
+                return re.sub(r"<[^>]+>", "", s or "").strip()
+
+            results.append({"title": strip(match.group(2)), "url": href,
+                            "snippet": strip(snippet.group(1) if snippet else "")[:300]})
+        return json.dumps({"query": query, "results": results}, ensure_ascii=False)
+
+    def _fetch_url(self, url: str, offset: int = 0) -> str:
+        final_url, response = self._get(url)
+        kind = response.headers.get("content-type", "").lower()
+        body = response.content[: self.FETCH_LIMIT]
+        if "pdf" in kind or final_url.lower().endswith(".pdf"):
+            return json.dumps({"url": final_url, "status": response.status_code, "note":
+                               "PDF: download and read it with run_python (pip install pypdf)."})
+        text = body.decode(response.encoding or "utf-8", errors="replace")
+        if "html" in kind or text.lstrip().lower().startswith(("<!doctype", "<html")):
+            parser = _TextExtractor()
+            parser.feed(text)
+            text = parser.text()
+        chunk = text[offset:offset + 20000]
+        return json.dumps({"url": final_url, "status": response.status_code, "content": chunk,
+                           "total_chars": len(text), "offset": offset}, ensure_ascii=False)
 
     SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 

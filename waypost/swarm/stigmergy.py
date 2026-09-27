@@ -23,22 +23,47 @@ MAX_DEPTH = 3
 MAX_ATTEMPTS = 3
 STALE_STEPS = 3
 QUORUM = 3
-KINDS = ("build", "check", "research", "write", "decide")
+KINDS = ("build", "check", "research", "analyze", "write", "decide")
+MAX_VERIFY_FAILS = 2
 _PASSTHROUGH = ("RunInterrupted", "BudgetExceeded")
 
 AGENT_RULES = (
     "You are one agent of a swarm. There are no meetings: the board shows what is done, claimed and "
-    "dead — never redo done work, reuse its results and files. For YOUR task choose exactly one:\n"
-    "- kind=final: you did it; answer = the result itself (for code: run it and its tests with "
-    "run_python first and include the real output).\n"
+    "dead — never redo done work; reuse its results and files. For YOUR task choose exactly one:\n"
+    "- kind=final: you did it. answer = the result itself (the text, the answer with its sources, the "
+    "numbers, what the files do). PROVE it, never claim it: facts — cite the sources you actually opened "
+    "(web_search, fetch_url), never your memory; numbers — compute them (run_python); code — run it and "
+    "its tests; text — meet every requirement of the task (length, tone, points). Set work_kind to what "
+    "you did (research/analyze/write/decide/build). An independent agent will check your proof.\n"
     "- kind=split: ONLY after a previous attempt showed the task is too big for one agent (see your "
-    "notes): 2-6 subtasks (id, goal, kind of build/check/research/write/decide, depends_on). Your first "
-    "attempt must do the task itself — one agent writes a whole small program in one go.\n"
-    "- kind=dead_end: truly impossible in this environment; answer = the exact reason. A missing Python "
-    "package is NOT a dead end: install it with pip first. Do not retry impossible things.\n"
+    "notes): 2-6 subtasks (id, goal, kind of build/research/analyze/write/decide/check, depends_on). Your "
+    "first attempt must do the task itself.\n"
+    "- kind=dead_end: truly impossible here; answer = the exact reason. First obtain what is missing — "
+    "search the web, open the source, install a package. Missing information you can look up is not a "
+    "dead end.\n"
     "- kind=conflict: you are integrating subtask results and two of them contradict; between = "
     "their two ids, answer = what they disagree on.\n"
     "If you have subtask results, integrate them into your result instead of redoing them."
+)
+
+# How an independent agent checks each kind of work: outside evidence, not
+# the author's word. Code is checked by running it (the environment).
+VERIFY_HOW = {
+    "research": "Open every cited source with fetch_url and check each important claim is actually "
+                "supported there. An important claim with no source, or a source that does not say it, is "
+                "a problem. If sources are missing, look the facts up yourself and report what is wrong.",
+    "analyze": "Recompute every number independently with run_python from the task's data. Any mismatch "
+               "is a problem; give the correct value.",
+    "write": "Check the text against every requirement stated in the task: length (count words with "
+             "run_python if a length is given), language, tone, required points, format. Each unmet "
+             "requirement is a problem.",
+    "decide": "Check the choice: are the options described correctly, is the reasoning sound for the "
+              "stated situation, is anything important missing or factually wrong? Each is a problem.",
+}
+VERIFY_RULES = (
+    "You are an independent checker in an agent swarm. You did not write this result. Check it with "
+    "outside evidence, not with trust. {how}\nFinish with kind=final and answer starting with the word "
+    "VERIFIED if it holds up, or with PROBLEMS: followed by one problem per line."
 )
 
 
@@ -60,7 +85,8 @@ class StigmergyMixin:
         tasks = self._tasks()
         fp = _fingerprint(goal)
         twin = next((t for t in tasks.values() if t["fp"] == fp and t["status"] in ("done", "dead_end")), None)
-        task = {"id": tid, "goal": goal, "kind": kind if kind in KINDS else "build", "parent": parent,
+        task = {"id": tid, "goal": goal, "kind": kind if kind in KINDS or kind == "auto" else "build",
+                "parent": parent,
                 "depends_on": list(depends_on), "depth": depth, "fp": fp, "status": "needed",
                 "attempts": 0, "notes": [], "children": [], "result": "", "files": [], "verified": False}
         if twin:
@@ -110,7 +136,8 @@ class StigmergyMixin:
     def _swarm_step(self):
         tasks = self._tasks()
         if not tasks:
-            self._new_task("goal", self.state["task"], kind="build")
+            # What kind of work the goal is, the agent says when it finishes.
+            self._new_task("goal", self.state["task"], kind="auto")
             self.state.setdefault("acceptance", [self.state["task"]])
         if not self.state.get("swarm_recovered"):
             # A claim held by a run that died is no one's claim now.
@@ -269,20 +296,62 @@ class StigmergyMixin:
     # ------------------------------------------------------------ outcomes
     def _on_final(self, task, outcome, key, record):
         files = self._artifacts_for(key)
+        answer = str(outcome.get("answer", ""))
+        wrote_code = any(f.endswith(".py") for f in files)
+        kind = outcome.get("work_kind") or task["kind"]
+        if kind in ("auto", None):
+            kind = "build" if wrote_code else "write"
         verified = self._ran_ok(record)
-        needs_run = task["kind"] == "build" and self.config.allow_python and files and any(
-            f.endswith(".py") for f in files)
-        if needs_run and not verified and task["attempts"] < 2:
-            # Words are not evidence: back to the board with that note.
-            task["notes"].append("You wrote code but did not run it. Run it and its tests with run_python, "
-                                 "then finish with the real output.")
-            task["status"] = "needed"
-            self.store.event("task_unverified", task=task["id"])
-            return
-        task.update(status="done", result=str(outcome.get("answer", "")), files=files, verified=verified)
-        self.store.event("mark_done", task=task["id"], verified=verified, files=files)
+        if kind == "build" or wrote_code:
+            # The environment is the checker: code counts once it ran.
+            if self.config.allow_python and wrote_code and not verified and task["attempts"] < 2:
+                task["notes"].append("You wrote code but did not run it. Run it and its tests with run_python, "
+                                     "then finish with the real output.")
+                task["status"] = "needed"
+                self.store.event("task_unverified", task=task["id"])
+                return
+        elif kind in VERIFY_HOW:
+            check = self._verify(task, kind, answer, files)
+            if check is not None:
+                ok, problems = check
+                if not ok:
+                    task["verify_fails"] = task.get("verify_fails", 0) + 1
+                    self.store.event("verify_failed", task=task["id"], work_kind=kind, problems=problems[:6])
+                    if task["verify_fails"] < MAX_VERIFY_FAILS:
+                        task["notes"].append("An independent checker found problems — fix them:\n- "
+                                             + "\n- ".join(problems[:8]))
+                        task["status"] = "needed"
+                        return
+                    answer += "\n\n---\nНе подтверждено проверкой:\n" + "\n".join("- " + p for p in problems[:8])
+                verified = ok
+        task.update(status="done", result=answer, files=files, verified=verified, work_kind=kind)
+        self.store.event("mark_done", task=task["id"], verified=verified, files=files, work_kind=kind)
         self._post("fact", f"{task['id']} done{' (run ok)' if verified else ''}: {task['result'][:200]}", task["id"])
         self._note_kind(task, success=True)
+
+    def _verify(self, task: dict, kind: str, answer: str, files: list[str]):
+        """A second agent, on another model, checks the result with outside
+        evidence. Returns (ok, problems), or None when no checker could be
+        reached — a missing checker does not block the work."""
+        key = f"v:{task['id']}:{task['attempts']}"
+        context = json.dumps({"task": task["goal"], "goals_above": self._board_brief(task)["goals_above"],
+                              "result_to_check": answer[:12000], "files": files}, ensure_ascii=False)
+        try:
+            verdict = self._worker("independent checker", VERIFY_RULES.format(how=VERIFY_HOW[kind]), context,
+                                   key, read_only=True, avoid_families=task.get("tried_families") or None,
+                                   max_failures=1, tier_hint="M")
+        except Exception as exc:  # noqa: BLE001
+            if type(exc).__name__ in _PASSTHROUGH:
+                raise
+            self.store.event("verify_unavailable", task=task["id"], error=str(exc)[:200])
+            return None
+        text = str(verdict).strip()
+        if text.upper().startswith("VERIFIED"):
+            self.store.event("verified", task=task["id"], work_kind=kind)
+            return True, []
+        body = text.split(":", 1)[1] if text.upper().startswith("PROBLEMS") else text
+        problems = [line.strip(" -•\t") for line in body.splitlines() if line.strip(" -•\t")]
+        return False, problems or [text[:300]]
 
     def _on_dead_end(self, task, outcome, key, record):
         """One ant's alarm does not stop the colony: a dead end is only a

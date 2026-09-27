@@ -77,7 +77,7 @@ class Plan(StrictModel):
 class SubtaskSpec(StrictModel):
     id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,48}$")
     goal: str = Field(min_length=1, max_length=4000)
-    kind: Literal["build", "check", "research", "write", "decide"] = "build"
+    kind: Literal["build", "check", "research", "analyze", "write", "decide"] = "build"
     depends_on: list[str] = Field(default_factory=list)
 
 
@@ -91,6 +91,8 @@ class Action(StrictModel):
     answer: str | None = None
     subtasks: list[SubtaskSpec] = Field(default_factory=list)
     between: list[str] = Field(default_factory=list)
+    # On final: what kind of work this was, so it is checked the right way.
+    work_kind: Literal["build", "research", "analyze", "write", "decide", "check"] | None = None
 
     @model_validator(mode="after")
     def valid_action(self):
@@ -248,6 +250,13 @@ class Position(StrictModel):
 class DebateRuling(StrictModel):
     chosen: int = Field(ge=0)
     why: str = Field(min_length=1)
+
+
+class Verification(StrictModel):
+    """An independent agent's check of a result against outside evidence."""
+    verified: bool
+    problems: list[str] = Field(default_factory=list)
+    evidence: str = ""
 
 
 class QuorumVote(StrictModel):

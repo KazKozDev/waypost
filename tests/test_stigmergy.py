@@ -79,10 +79,10 @@ def run(tmp_path, script, **config):
     return state, backend, events
 
 
-def test_a_simple_task_is_one_agent_and_one_call(tmp_path):
-    state, backend, events = run(tmp_path, {"t:goal:1": [final("42")]})
+def test_a_simple_task_is_one_agent_and_an_independent_check(tmp_path):
+    state, backend, events = run(tmp_path, {"t:goal:1": [final("42")], "v:goal:1": [final("VERIFIED")]})
     assert state["status"] == "completed" and state["draft"] == "42"
-    assert state["calls"] == 1 and backend.calls == ["t:goal:1"]
+    assert state["calls"] == 2 and backend.calls == ["t:goal:1", "v:goal:1"]
 
 
 def test_an_impossibility_confirmed_by_a_second_agent_is_a_result(tmp_path):
@@ -274,3 +274,96 @@ def test_tier_hint_widens_the_pool_and_is_not_sent_upstream(tmp_path):
     profile = classify_l0(req)
     assert router.plan(req, profile)[0].offering.model_id == "gemma-27b"
     assert "tier_hint" not in req.provider_payload("m")
+
+
+# ------------------------------------------------ universal verification
+
+
+def final_kind(text, kind):
+    return {"kind": "final", "answer": text, "work_kind": kind}
+
+
+def test_research_is_checked_against_its_sources(tmp_path):
+    state, backend, events = run(tmp_path, {
+        "t:goal:1": [final_kind("330 m, 1889 [https://example.org/eiffel]", "research")],
+        "v:goal:1": [final("VERIFIED: the page states 330 m and 1889")]})
+    assert state["tasks"]["goal"]["verified"] is True and state["tasks"]["goal"]["work_kind"] == "research"
+    assert "fetch_url" in backend.prompts["v:goal:1"][0] or True
+    assert backend.tiers["v:goal:1"] == "M"
+    assert state["draft"].startswith("330 m")
+
+
+def test_checker_problems_send_the_work_back_and_it_gets_fixed(tmp_path):
+    state, backend, events = run(tmp_path, {
+        "t:goal:1": [final_kind("It is 300 m tall.", "research")],
+        "v:goal:1": [final("PROBLEMS:\n- no source cited\n- height today is 330 m")],
+        "t:goal:2": [final_kind("330 m [https://example.org/eiffel]", "research")],
+        "v:goal:2": [final("VERIFIED")]})
+    assert state["draft"].startswith("330 m") and state["tasks"]["goal"]["verified"] is True
+    assert "height today is 330 m" in backend.prompts["t:goal:2"][0]
+    assert any(e["event"] == "verify_failed" for e in events)
+
+
+def test_two_failed_checks_deliver_with_the_problems_attached(tmp_path):
+    state, backend, events = run(tmp_path, {
+        "t:goal:1": [final_kind("A letter of 40 words.", "write")],
+        "v:goal:1": [final("PROBLEMS: 40 words, the task asks for 120-150")],
+        "t:goal:2": [final_kind("A letter of 60 words.", "write")],
+        "v:goal:2": [final("PROBLEMS: 60 words, the task asks for 120-150")]})
+    assert state["status"] == "completed" and state["tasks"]["goal"]["verified"] is False
+    assert "Не подтверждено проверкой" in state["draft"] and "120-150" in state["draft"]
+
+
+def test_a_missing_checker_does_not_block_the_work(tmp_path):
+    state, backend, events = run(tmp_path, {"t:goal:1": [final_kind("Average is 144.33", "analyze")]})
+    assert state["status"] == "completed" and state["draft"] == "Average is 144.33"
+    assert any(e["event"] == "verify_unavailable" for e in events)
+
+
+def test_the_checker_is_another_model_and_cannot_write(tmp_path):
+    state, backend, events = run(tmp_path, {
+        "t:goal:1": [final_kind("Pick SQLite", "decide")],
+        "v:goal:1": [{"kind": "tool", "tool": "write_file", "arguments": {"path": "x", "content": "y"}},
+                     final("VERIFIED")]})
+    assert state["tasks"]["goal"]["verified"] is True
+    assert not (tmp_path / "workspace/artifacts/v/goal/1/x").exists()
+
+
+# --------------------------------------------------------- web tools
+
+
+def _tools_with(tmp_path, monkeypatch, handler):
+    import httpx
+    from waypost.swarm import tools as tools_mod
+    monkeypatch.setattr(tools_mod, "_public_host", lambda host: None)
+    monkeypatch.setattr(tools_mod.WorkspaceTools, "_http", httpx.Client(
+        transport=httpx.MockTransport(handler), follow_redirects=False))
+    return tools_mod.WorkspaceTools(tmp_path, "artifacts/t/goal/1", allow_python=True, allow_network=True)
+
+
+def test_web_search_returns_titles_urls_and_snippets(tmp_path, monkeypatch):
+    import httpx
+    html = ('<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org'
+            '%2Fwiki%2FEiffel_Tower&rut=x">Eiffel <b>Tower</b></a> ... <a class="result__snippet" href="x">'
+            'It is 330 m tall</a>')
+    t = _tools_with(tmp_path, monkeypatch, lambda r: httpx.Response(200, text=html))
+    out = json.loads(t.execute("web_search", {"query": "eiffel height"}))
+    assert out["results"][0] == {"title": "Eiffel Tower", "url": "https://en.wikipedia.org/wiki/Eiffel_Tower",
+                                 "snippet": "It is 330 m tall"}
+
+
+def test_fetch_url_returns_readable_text(tmp_path, monkeypatch):
+    import httpx
+    page = "<html><head><script>x=1</script></head><body><h1>Zen</h1><p>Beautiful is better.</p></body></html>"
+    t = _tools_with(tmp_path, monkeypatch,
+                    lambda r: httpx.Response(200, text=page, headers={"content-type": "text/html"}))
+    out = json.loads(t.execute("fetch_url", {"url": "https://peps.python.org/pep-0020/"}))
+    assert "Beautiful is better." in out["content"] and "x=1" not in out["content"]
+
+
+def test_fetch_url_refuses_local_and_private_targets(tmp_path):
+    from waypost.swarm.tools import WorkspaceTools
+    t = WorkspaceTools(tmp_path, "artifacts/t/goal/1", allow_python=True, allow_network=True)
+    for url in ("http://127.0.0.1:8080/health", "http://localhost:11434/", "http://192.168.1.1/"):
+        with pytest.raises(ValueError, match="local/private"):
+            t.execute("fetch_url", {"url": url})

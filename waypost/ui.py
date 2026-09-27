@@ -459,9 +459,12 @@ function eventView(e){
   if(kind==='invalid_output')return addLog(e.time,'Исправление ответа',e.error||'Неверный формат');
   if(kind==='task_posted')return addLog(e.time,'Доска · нужна '+e.task,(e.goal||'')+(e.depends_on?.length?' · после: '+e.depends_on.join(', '):''));
   if(kind==='task_claimed')return addLog(e.time,'Взял · '+e.task,(e.work_kind||'')+(e.attempt>1?' · попытка '+e.attempt:''));
-  if(kind==='mark_done')return addLog(e.time,'Сделано · '+e.task,(e.verified?'✓ проверено запуском':'')+(e.files?.length?' · '+e.files.join(', '):''));
+  if(kind==='mark_done')return addLog(e.time,'Сделано · '+e.task,(e.verified?'✓ проверено'+(e.work_kind==='build'?' запуском':''):'')+(e.files?.length?' · '+e.files.join(', '):''));
   if(kind==='task_split')return addLog(e.time,'Разложил · '+e.task,'подзадачи: '+(e.children||[]).join(', '));
   if(kind==='task_dead_end')return addLog(e.time,'Тупик · '+e.task,e.reason||'');
+  if(kind==='verified')return addLog(e.time,'Проверено · '+e.task,'независимый агент подтвердил ('+(e.work_kind||'')+')');
+  if(kind==='verify_failed')return addBubble('Проверка не пройдена · '+e.task,(e.problems||[]).map(p=>'- '+p).join('\n'),'monitor');
+  if(kind==='verify_unavailable')return addLog(e.time,'Проверка недоступна · '+e.task,e.error||'');
   if(kind==='dead_end_suspected')return addLog(e.time,'Подозрение на тупик · '+e.task,(e.reason||'')+' — проверит другой агент');
   if(kind==='task_reused')return addLog(e.time,'Уже сделано · '+e.task,'взят результат '+e.twin);
   if(kind==='task_unverified')return addLog(e.time,'Не проверено · '+e.task,'код не запускали — назад на доску');

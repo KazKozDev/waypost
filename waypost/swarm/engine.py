@@ -50,7 +50,7 @@ MEMORY_LESSONS_SHOWN = 5
 MEMORY_POOR_FAILS = 2
 MEMORY_ROLES = ("supervisor", "review-verdict", "review-consensus", "judge-plan", "judge-draft",
                 "synthesis", "audit", "swarm-build", "swarm-check", "swarm-research", "swarm-write",
-                "swarm-decide")
+                "swarm-decide", "swarm-analyze", "swarm-auto")
 
 # The shared board: what every agent sees of what the others learned.
 BOARD_KINDS = ("fact", "decision", "assumption", "dead_end")
