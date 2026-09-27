@@ -188,3 +188,13 @@ def test_a_task_never_waits_on_its_own_ancestor(tmp_path):
         "t:goal:2": [final("done")]})
     assert state["status"] == "completed" and state["draft"] == "done"
     assert state["tasks"]["goal.a"]["depends_on"] == []
+
+
+def test_agent_history_does_not_resend_whole_files():
+    from waypost.swarm.engine import HISTORY_TEXT_LIMIT, _compact_history
+    big = "x" * 30000
+    history = [{"action": {"kind": "tool", "tool": "write_file", "arguments": {"path": "a.py", "content": big}}},
+               {"observation": json.dumps({"content": big})}]
+    compact = json.dumps(_compact_history(history))
+    assert len(compact) < 2 * HISTORY_TEXT_LIMIT + 500
+    assert "read_file for the rest" in compact and '"path": "a.py"' in compact

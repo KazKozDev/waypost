@@ -73,6 +73,36 @@ class ModelUnavailable(RuntimeError):
     the loop fuse, not a crash, is what ends a run the router cannot serve."""
 
 
+# What an agent re-reads of its own recent steps. Whole files written and
+# read went back into every prompt: a live run sent a 48k-token request that
+# the local model spent 12+ minutes just reading, and another run queued
+# behind it. The files are on disk; the agent can read them again.
+HISTORY_TEXT_LIMIT = 1500
+
+
+def _compact_history(history: list) -> list:
+    def clip(text):
+        text = str(text)
+        if len(text) <= HISTORY_TEXT_LIMIT:
+            return text
+        return text[:HISTORY_TEXT_LIMIT] + f"… [{len(text) - HISTORY_TEXT_LIMIT} more chars; read_file for the rest]"
+
+    compact = []
+    for item in history:
+        if "action" in item:
+            action = dict(item["action"])
+            action["arguments"] = {k: clip(v) if isinstance(v, str) else v
+                                   for k, v in (action.get("arguments") or {}).items()}
+            if action.get("answer"):
+                action["answer"] = clip(action["answer"])
+            compact.append({"action": action})
+        elif "observation" in item:
+            compact.append({"observation": clip(item["observation"])})
+        else:
+            compact.append(item)
+    return compact
+
+
 def _normalize_task_ids(value):
     """Models copy the engine's record keys ('r2:comment_code') into task
     ids, which the schema forbids; a live run lost a whole round to six
@@ -949,7 +979,7 @@ class SwarmEngine(StigmergyMixin, CoordinatorMixin):
                                    "(to check) and board_post are allowed.")
         while self.config.max_steps is None or record["steps"] < self.config.max_steps:
             self.budget.check()
-            history = json.dumps(record["history"][-8:], ensure_ascii=False)
+            history = json.dumps(_compact_history(record["history"][-8:]), ensure_ascii=False)
             action, family = self._structured_answer(key, system_instruction,
                                                      context + "\nOBSERVATIONS:\n" + history, Action,
                                                      avoid_families=avoid_families,
