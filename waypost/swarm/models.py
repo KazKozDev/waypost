@@ -24,6 +24,8 @@ class SwarmConfig(StrictModel):
     # On by default: a swarm that cannot run its code can only claim it works.
     # NOT a sandbox — code runs as the user (see tools.py).
     allow_python: bool = True
+    # Internet for that code (never localhost). On at the user's request.
+    allow_network: bool = True
     # Collective: how many independent members answer a collective question,
     # and whether each must come from a model family the others did not.
     collective_width: int = Field(default=3, ge=1, le=5)

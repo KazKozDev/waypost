@@ -1,6 +1,8 @@
 """Workspace tools. Python runs only inside an OS sandbox (macOS Seatbelt):
-no network, writes only to the agent's own output directory, no reads of
-the user's home outside the run workspace. No sandbox, no execution."""
+writes only to the agent's own output directory, no reads of the user's
+home outside the run workspace, never this machine's own services
+(localhost); the internet is allowed unless turned off. No sandbox, no
+execution."""
 from __future__ import annotations
 
 import json
@@ -16,11 +18,13 @@ import threading
 class WorkspaceTools:
     _write_lock = threading.RLock()
 
-    def __init__(self, root: Path, output_prefix: str, allow_python: bool = False):
+    def __init__(self, root: Path, output_prefix: str, allow_python: bool = False,
+                 allow_network: bool = False):
         self.root = root.resolve()
         self.output = self._path(output_prefix)
         self.output.mkdir(parents=True, exist_ok=True)
         self.allow_python = allow_python
+        self.allow_network = allow_network
 
     def _path(self, name: str) -> Path:
         path = (self.root / name).resolve()
@@ -35,8 +39,11 @@ class WorkspaceTools:
             "write_file": {"path": "relative filename inside your output directory", "content": "UTF-8 text"},
         }
         if self.allow_python:
-            tools["run_python"] = {"code": "Python source; cwd is your output directory. Sandboxed: no "
-                                           "network, writes only in your output directory"}
+            tools["run_python"] = {"code": "Python source; cwd is your output directory. Sandboxed: writes "
+                                           "only in your output directory; " + (
+                                               "internet allowed (not localhost); install packages with "
+                                               "pip install --target ." if self.allow_network
+                                               else "no network")}
         if read_only:
             tools.pop("write_file")
         return json.dumps({"tools": tools, "your_output_directory": str(self.output.relative_to(self.root)),
@@ -108,7 +115,11 @@ class WorkspaceTools:
         readable = {self.root, Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve(),
                     Path(sys.executable).resolve().parent}
         q = self._sb_path
-        lines = ["(version 1)", "(allow default)", "(deny network*)",
+        # The internet when allowed; this machine's own services never — the
+        # router, Ollama and anything else listening on localhost stay out.
+        network = ('(deny network-outbound (remote ip "localhost:*"))' if self.allow_network
+                   else "(deny network*)")
+        lines = ["(version 1)", "(allow default)", network,
                  "(deny file-write*)",
                  f"(allow file-write* (subpath {q(self.output)}) (literal \"/dev/null\") (literal \"/dev/tty\"))",
                  f"(deny file-read* (subpath {q(home)}))"]

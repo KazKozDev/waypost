@@ -910,7 +910,7 @@ class SwarmEngine(CoordinatorMixin):
             if record["status"] == "done":
                 return record["answer"]
         tools = WorkspaceTools(self.store.workspace, "artifacts/" + key.replace(":", "/"),
-                               self.config.allow_python)
+                               self.config.allow_python, self.config.allow_network)
         system_instruction = f"Your specialty: {role}.\n" + instruction + "\nTOOLS:\n" + tools.describe(read_only) + "\nUse kind=tool to act or kind=final with answer when finished."
         system_instruction += ("\nTo inspect a dependency artifact, call read_file with its exact "
                                "workspace-relative path from dependency_artifacts. "

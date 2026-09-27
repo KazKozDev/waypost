@@ -296,3 +296,19 @@ def test_no_sandbox_means_no_execution(tmp_path, monkeypatch):
     tools = WorkspaceTools(tmp_path, "artifacts/r1/a", allow_python=True)
     with _pytest.raises(ValueError, match="no OS sandbox"):
         tools.execute("run_python", {"code": "print(1)"})
+
+
+@_pytest.mark.skipif(not _has_sandbox, reason="needs macOS sandbox-exec")
+def test_internet_on_still_never_reaches_localhost(tmp_path):
+    from waypost.swarm.tools import WorkspaceTools
+    tools = WorkspaceTools(tmp_path / "ws", "artifacts/r1/a", allow_python=True, allow_network=True)
+    assert "localhost" in tools._sandbox_profile() and "(deny network*)" not in tools._sandbox_profile()
+    out = json.loads(tools.execute("run_python", {"code": (
+        "import socket; socket.create_connection(('127.0.0.1', 8080), timeout=3)")}, timeout=20))
+    assert out["exit_code"] != 0 and "Operation not permitted" in out["output"]
+
+
+def test_network_off_denies_all_network(tmp_path):
+    from waypost.swarm.tools import WorkspaceTools
+    tools = WorkspaceTools(tmp_path, "artifacts/r1/a", allow_python=True, allow_network=False)
+    assert "(deny network*)" in tools._sandbox_profile()
