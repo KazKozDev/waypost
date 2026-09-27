@@ -202,7 +202,11 @@ class StigmergyMixin:
             self.state["swarm_stale"] = 0
 
     def _swarm_finish(self, goal: dict, reason: str = ""):
-        if goal["status"] == "dead_end":
+        if goal["status"] == "dead_end" and goal.get("gave_up"):
+            # Honest: the swarm failed to finish; the task is not impossible.
+            self.state["draft"] = (f"Не доделано за {goal['attempts']} попытки. Причина: {goal['result']}\n"
+                                   "Ниже — что успели сделать.")
+        elif goal["status"] == "dead_end":
             self.state["draft"] = "Невозможно в этой среде: " + goal["result"]
         else:
             self.state["draft"] = goal["result"] or self._partial_results()
@@ -221,8 +225,12 @@ class StigmergyMixin:
         """The product is the files, whatever the agent chose to say: list
         them and include the code. Build byproducts are not the product."""
         noise = ("__pycache__", ".dist-info", "/.", "Library/Caches", "/include/", "/bin/", "/lib/")
-        files = sorted({f for t in self._tasks().values() if t["status"] == "done" for f in t["files"]
-                        if not any(n in f for n in noise)})
+        tasks = self._tasks().values()
+        files = sorted({f for t in tasks if t["status"] == "done" for f in t["files"] if not any(n in f for n in noise)})
+        if not files and self._tasks()["goal"]["status"] != "done":
+            # The goal was not finished: show what the attempts left on disk.
+            files = sorted({f for key in self.state.get("records", {}) if key.startswith("t:")
+                            for f in self._artifacts_for(key) if not any(n in f for n in noise)})
         if not files:
             return ""
         parts = ["\n\n---\nФайлы результата:\n" + "\n".join(f"- {f}" for f in files)]
@@ -298,6 +306,7 @@ class StigmergyMixin:
     def _attempt_failed(self, task: dict, why: str):
         task["notes"].append(f"attempt {task['attempts']} failed: {why}")
         if task["attempts"] >= MAX_ATTEMPTS:
+            task["gave_up"] = True  # not impossible: not finished
             self._mark_dead(task, f"gave up after {task['attempts']} attempts: {why}")
         else:
             task["status"] = "needed"

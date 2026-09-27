@@ -225,9 +225,11 @@ def test_agent_history_does_not_resend_whole_files():
     big = "x" * 30000
     history = [{"action": {"kind": "tool", "tool": "write_file", "arguments": {"path": "a.py", "content": big}}},
                {"observation": json.dumps({"content": big})}]
-    compact = json.dumps(_compact_history(history))
-    assert len(compact) < 2 * HISTORY_TEXT_LIMIT + 500
-    assert "read_file for the rest" in compact and '"path": "a.py"' in compact
+    compact = _compact_history(history)
+    # the written file in the action is clipped; the latest observation is
+    # seen whole up to its own, larger limit
+    assert len(json.dumps(compact[0])) < HISTORY_TEXT_LIMIT + 300
+    assert "read_file with offset" in json.dumps(compact) and '"path": "a.py"' in json.dumps(compact)
 
 
 def test_the_result_carries_the_product_files(tmp_path):
@@ -418,3 +420,30 @@ def test_incomplete_work_is_not_delivered_after_two_checks_if_attempts_remain(tm
 def test_the_checker_is_told_to_list_the_tasks_requirements():
     from waypost.swarm.stigmergy import VERIFY_RULES
     assert "list every requirement" in VERIFY_RULES and "how many points" in VERIFY_RULES
+
+
+def test_the_latest_observation_is_seen_whole():
+    from waypost.swarm.engine import _compact_history
+    big = "y" * 10000
+    history = [{"observation": "x" * 5000}, {"action": {"kind": "tool", "tool": "read_file",
+                                                          "arguments": {"path": "ttt.py"}}},
+               {"observation": big}]
+    compact = _compact_history(history)
+    assert len(compact[0]["observation"]) < 1700 and compact[-1]["observation"] == big
+
+
+def test_a_leading_slash_means_the_workspace(tmp_path):
+    from waypost.swarm.tools import WorkspaceTools
+    a = WorkspaceTools(tmp_path, "artifacts/t/goal/2")
+    a.execute("write_file", {"path": "ttt.py", "content": "x"})
+    b = WorkspaceTools(tmp_path, "artifacts/t/goal/3")
+    assert json.loads(b.execute("read_file", {"path": "/artifacts/t/goal/2/ttt.py"}))["content"] == "x"
+
+
+def test_giving_up_is_reported_as_unfinished_with_the_files(tmp_path):
+    stuck = [{"kind": "tool", "tool": "list_files", "arguments": {}}] * 8
+    state, backend, events = run(tmp_path, {
+        "t:goal:1": [write("ttt.py", "print(1)")] + stuck,
+        "t:goal:2": stuck, "t:goal:3": stuck})
+    assert state["draft"].startswith("Не доделано за 3 попытки")
+    assert "Невозможно" not in state["draft"] and "ttt.py" in state["draft"]

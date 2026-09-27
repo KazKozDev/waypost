@@ -80,15 +80,25 @@ class ModelUnavailable(RuntimeError):
 HISTORY_TEXT_LIMIT = 1500
 
 
-def _compact_history(history: list) -> list:
-    def clip(text):
-        text = str(text)
-        if len(text) <= HISTORY_TEXT_LIMIT:
-            return text
-        return text[:HISTORY_TEXT_LIMIT] + f"… [{len(text) - HISTORY_TEXT_LIMIT} more chars; read_file for the rest]"
+# The latest observation is what the agent is working from: it must see it
+# whole. Clipping it too made an agent re-read the same file ~30 times, never
+# seeing past its first 1500 chars.
+LATEST_OBSERVATION_LIMIT = 16000
 
+
+def _compact_history(history: list) -> list:
+    def clip(text, limit=HISTORY_TEXT_LIMIT):
+        text = str(text)
+        if len(text) <= limit:
+            return text
+        return text[:limit] + f"… [{len(text) - limit} more chars; read_file with offset for the rest]"
+
+    last_observation = max((i for i, item in enumerate(history) if "observation" in item), default=-1)
     compact = []
-    for item in history:
+    for index, item in enumerate(history):
+        if index == last_observation:
+            compact.append({"observation": clip(item["observation"], LATEST_OBSERVATION_LIMIT)})
+            continue
         if "action" in item:
             action = dict(item["action"])
             action["arguments"] = {k: clip(v) if isinstance(v, str) else v

@@ -76,7 +76,8 @@ class WorkspaceTools:
         self.allow_network = allow_network
 
     def _path(self, name: str) -> Path:
-        path = (self.root / name).resolve()
+        # "/artifacts/x" means the workspace's artifacts, not the disk root.
+        path = (self.root / str(name).lstrip("/")).resolve()
         if not path.is_relative_to(self.root):
             raise ValueError("Path must stay inside the run workspace")
         return path
