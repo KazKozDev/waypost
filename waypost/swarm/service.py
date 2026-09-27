@@ -32,7 +32,7 @@ class SwarmService:
         return directory
 
     def _launch(self, directory: Path, *, resume: bool = False,
-                model: str = "auto", privacy: str = "normal", allow_python: bool = False):
+                model: str = "auto", privacy: str = "normal", allow_python: bool = True):
         if importlib.util.find_spec("swarms") is None:
             raise RuntimeError("Swarms is not installed. Run: pip install -e '.[swarm]'")
         command = [sys.executable, "-m", "waypost.swarm"]
@@ -43,8 +43,8 @@ class SwarmService:
             command += ["run", "--task-file", str(directory / "task.txt"),
                         "--run-dir", str(directory), "--base-url", self.base_url,
                         "--model", model, "--privacy", privacy]
-            if allow_python:
-                command.append("--allow-python")
+            if not allow_python:
+                command.append("--no-python")
         with (directory / "runner.log").open("a") as output:
             process = subprocess.Popen(command, cwd=Path(__file__).resolve().parents[2],
                                        stdout=output, stderr=subprocess.STDOUT,
@@ -53,7 +53,7 @@ class SwarmService:
         (directory / "process.json").write_text(json.dumps({"pid": process.pid}))
 
     def create(self, task: str, *, model: str = "auto", privacy: str = "normal",
-               allow_python: bool = False) -> str:
+               allow_python: bool = True) -> str:
         if not task.strip():
             raise ValueError("Task must not be empty")
         if len(task) > 200_000:

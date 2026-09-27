@@ -910,7 +910,7 @@ class SwarmEngine(CoordinatorMixin):
             if record["status"] == "done":
                 return record["answer"]
         tools = WorkspaceTools(self.store.workspace, "artifacts/" + key.replace(":", "/"),
-                               self.config.allow_python and not read_only)
+                               self.config.allow_python)
         system_instruction = f"Your specialty: {role}.\n" + instruction + "\nTOOLS:\n" + tools.describe(read_only) + "\nUse kind=tool to act or kind=final with answer when finished."
         system_instruction += ("\nTo inspect a dependency artifact, call read_file with its exact "
                                "workspace-relative path from dependency_artifacts. "
@@ -921,8 +921,12 @@ class SwarmEngine(CoordinatorMixin):
                                    "call tool board_post with {\"kind\": fact|decision|assumption|dead_end, "
                                    "\"text\": \"...\"} — a fact you verified, a choice you made, an assumption, "
                                    "or an approach that failed.")
+        if self.config.allow_python:
+            system_instruction += ("\nVerify by running, not by claiming: run the code and its tests with "
+                                   "run_python before you finish, and report the actual output.")
         if read_only:
-            system_instruction += "\nOnly read_file, list_files and board_post are allowed."
+            system_instruction += ("\nDo not modify deliverables: only read_file, list_files, run_python "
+                                   "(to check) and board_post are allowed.")
         while self.config.max_steps is None or record["steps"] < self.config.max_steps:
             self.budget.check()
             history = json.dumps(record["history"][-8:], ensure_ascii=False)
@@ -952,7 +956,7 @@ class SwarmEngine(CoordinatorMixin):
                         raise ValueError("board_post requires nonempty text")
                     observation = json.dumps({"posted": entry})
                 else:
-                    if read_only and action.tool not in {"read_file", "list_files"}:
+                    if read_only and action.tool not in {"read_file", "list_files", "run_python"}:
                         raise ValueError("Reviewer only has read access")
                     observation = tools.execute(action.tool, action.arguments, timeout=self.budget.remaining())
             except BudgetExceeded:

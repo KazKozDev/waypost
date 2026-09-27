@@ -3695,7 +3695,7 @@ async def swarm_create(payload: dict = Body(...)):
         run_id = app.state.swarm_service.create(
             str(payload.get("task", "")), model=str(payload.get("model", "auto")),
             privacy=str(payload.get("privacy", "normal")),
-            allow_python=bool(payload.get("allow_python", False)))
+            allow_python=bool(payload.get("allow_python", True)))
         return app.state.swarm_service.status(run_id)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

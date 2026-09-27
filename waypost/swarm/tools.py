@@ -1,4 +1,6 @@
-"""Workspace tools. Python execution is opt-in and is NOT a security sandbox."""
+"""Workspace tools. Python runs only inside an OS sandbox (macOS Seatbelt):
+no network, writes only to the agent's own output directory, no reads of
+the user's home outside the run workspace. No sandbox, no execution."""
 from __future__ import annotations
 
 import json
@@ -33,7 +35,8 @@ class WorkspaceTools:
             "write_file": {"path": "relative filename inside your output directory", "content": "UTF-8 text"},
         }
         if self.allow_python:
-            tools["run_python"] = {"code": "Python source; cwd is your output directory"}
+            tools["run_python"] = {"code": "Python source; cwd is your output directory. Sandboxed: no "
+                                           "network, writes only in your output directory"}
         if read_only:
             tools.pop("write_file")
         return json.dumps({"tools": tools, "your_output_directory": str(self.output.relative_to(self.root)),
@@ -91,13 +94,39 @@ class WorkspaceTools:
             return self._python(arguments["code"], min(timeout, 30))
         raise ValueError(f"Unknown or disabled tool: {name}")
 
+    SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+
+    @staticmethod
+    def _sb_path(path) -> str:
+        return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    def _sandbox_profile(self) -> str:
+        """Allow ordinary work; deny what could hurt the user. Everything the
+        code starts inherits the profile. Seatbelt applies the last matching
+        rule, so each deny comes before its narrower allow."""
+        home = Path.home().resolve()
+        readable = {self.root, Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve(),
+                    Path(sys.executable).resolve().parent}
+        q = self._sb_path
+        lines = ["(version 1)", "(allow default)", "(deny network*)",
+                 "(deny file-write*)",
+                 f"(allow file-write* (subpath {q(self.output)}) (literal \"/dev/null\") (literal \"/dev/tty\"))",
+                 f"(deny file-read* (subpath {q(home)}))"]
+        lines += [f"(allow file-read* (subpath {q(p)}))" for p in sorted(readable, key=str)]
+        return "\n".join(lines)
+
     def _python(self, code: str, timeout: float) -> str:
         if not isinstance(code, str) or len(code) > 50000:
             raise ValueError("Python code must be text of at most 50000 characters")
-        # No provider keys inherited. This reduces accidental leakage but is not isolation.
-        env = {k: os.environ[k] for k in ("PATH", "LANG", "SYSTEMROOT") if k in os.environ}
+        if sys.platform != "darwin" or not os.access(self.SANDBOX_EXEC, os.X_OK):
+            # Fail closed: agent-written code never runs unconfined.
+            raise ValueError("Python execution is unavailable: no OS sandbox on this machine")
+        # No provider keys inherited, and HOME/TMPDIR point into the output dir.
+        env = {k: os.environ[k] for k in ("PATH", "LANG") if k in os.environ}
+        env.update(HOME=str(self.output), TMPDIR=str(self.output))
+        command = [self.SANDBOX_EXEC, "-p", self._sandbox_profile(), sys.executable, "-I", "-c", code]
         with tempfile.TemporaryFile() as output:
-            proc = subprocess.Popen([sys.executable, "-I", "-c", code], cwd=self.output,
+            proc = subprocess.Popen(command, cwd=self.output,
                                     env=env, stdout=output, stderr=subprocess.STDOUT,
                                     start_new_session=True)
             timed_out = False

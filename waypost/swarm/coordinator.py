@@ -174,7 +174,11 @@ class CoordinatorMixin:
             "coordinator-plan",
             ("Revise" if revising else "Write") + " the task ledger: acceptance criteria, known facts, educated "
             "guesses, an ordered plan, and the team — at least TWO roles with different perspectives (for a "
-            "simple task e.g. a builder and a critic; more only when the work really splits). council = how "
+            "simple task e.g. a builder and a critic). The deliverable is ONE integrated, working product: "
+            "split work only where parts are truly independent; do not slice one program into many tiny "
+            "requests. Decisions (which storage, which library) are forks for the council, not work items. "
+            "Team: roles like a builder and a critic ("
+            "more roles only when the work really splits). council = how "
             "many model families should decide each fork (2 for simple work, up to 5 for hard, contested "
             "work). The swarm is autonomous. Roles can read/write files"
             + (" and run Python." if self.config.allow_python else "; Python and web access are unavailable."),
@@ -207,14 +211,24 @@ class CoordinatorMixin:
     # --------------------------------------------------- board: volunteers
     def _coord_post(self, step: CoordinatorStep):
         requests = self.state.setdefault("requests", [])
-        known = {r["id"] for r in requests}
+        by_id = {r["id"]: r for r in requests}
         for spec in step.requests:
-            rid = spec.id if spec.id not in known else f"{spec.id}_{len(requests) + 1}"
-            requests.append({"id": rid, "need": spec.need, "why": spec.why, "done_when": spec.done_when,
-                             "depends_on": list(spec.depends_on), "status": "open",
-                             "round": self.state["round"]})
-            known.add(rid)
-            self.store.event("request_posted", request=rid, need=spec.need[:400], depends_on=spec.depends_on)
+            existing = by_id.get(spec.id)
+            if existing and existing["status"] == "done":
+                # Already done: re-posting it is the repetition that wastes
+                # a run; the council sees the result instead.
+                self.store.event("request_already_done", request=spec.id)
+                continue
+            fields = {"need": spec.need, "why": spec.why, "done_when": spec.done_when,
+                      "depends_on": list(spec.depends_on), "status": "open", "round": self.state["round"]}
+            if existing:
+                # Same id, not done: update it in place, so every request that
+                # depends on this id keeps pointing at the right one.
+                existing.update(fields)
+            else:
+                by_id[spec.id] = {"id": spec.id, **fields}
+                requests.append(by_id[spec.id])
+            self.store.event("request_posted", request=spec.id, need=spec.need[:400], depends_on=spec.depends_on)
         # Work in dependency order: whatever became ready runs next, until
         # nothing more can start.
         while self._dispatch():
@@ -241,7 +255,8 @@ class CoordinatorMixin:
                 offer, family = self._structured_answer(
                     f"volunteer:{member['role'][:40]}",
                     f"You are {member['role']} ({member.get('strengths', '')}) in an agent swarm. Requests are "
-                    "on the board. Take ONLY those you can do well; for each, describe concretely HOW you would "
+                    "on the board. Take ONLY those that fit your role and you can do well; for each, describe "
+                    "concretely HOW you would "
                     "do it — your approach is compared with other volunteers'. Take nothing if none fit.",
                     json.dumps({"task": self.state["task"], "open_requests": board,
                                 "board": self._board_view()}, ensure_ascii=False),
@@ -264,8 +279,15 @@ class CoordinatorMixin:
                                      for m, c in offers[:5]],
                              why=picks.get(r["id"], (None, None, ""))[2])
             if not offers:
-                r["status"] = "unclaimed"
-                self._post("fact", f"Nobody on the team took request {r['id']}: {r['need'][:300]}", "board")
+                # Nobody takes a request that is really a decision ("choose the
+                # storage") — it is a fork, so the council settles it; its
+                # ruling is the request's result.
+                self._post("fact", f"Nobody on the team took request {r['id']}; the council decides it.",
+                           "board")
+                stance = self._deliberate(f"{r['need']}" + (f" (done when: {r['done_when']})"
+                                                            if r.get("done_when") else ""))
+                r.update(status="done", by="council", result="Council decision: " + stance, files=[])
+                self.store.event("request_done", request=r["id"], by="council", status="done", files=[])
                 continue
             member, claim, why = picks[r["id"]]
             r.update(status="claimed", by=member["role"], approach=claim.approach, why_chosen=why)
@@ -384,10 +406,12 @@ class CoordinatorMixin:
                               "results": [{"id": r["id"], "by": r.get("by"), "result": r.get("result", "")[:6000],
                                            "files": r.get("files", [])} for r in done],
                               "board": self._board_view()}, ensure_ascii=False)
-        return self._worker("synthesizer", "Deliver the PRODUCT, not a report about it. Start with the list of "
-                            "final files (exact paths) — when several versions of a file exist, name the one "
-                            "that is final and why. Then include the main deliverable itself (read the file and "
-                            "put its content in the answer), then how to use it. Do not redo finished work. "
+        return self._worker("synthesizer", "Deliver the PRODUCT, not a report about it. If the work is split "
+                            "across files that import each other by workspace paths, integrate it into one "
+                            "working product in your own output directory (fix the imports); if Python is "
+                            "available, RUN it and its tests there and fix what fails. Then answer with: the "
+                            "final files (exact paths; name the final one when versions differ), the main "
+                            "deliverable itself (its content), the actual test/run output, and how to use it. "
                             "Resolve contradictions noted on the board.", context, key)
 
     def _current_draft(self) -> str:

@@ -140,14 +140,38 @@ def test_dependent_request_waits_for_its_dependency(tmp_path):
     assert state["requests"][1]["by"] == "critic"
 
 
-def test_unclaimed_request_goes_back_to_the_council(tmp_path):
+def test_a_request_nobody_takes_is_settled_by_the_council(tmp_path):
+    """"Decide the storage" is a fork, not work: nobody volunteers, so the
+    council debates it and its ruling is the request's result."""
+    json_file = {"stance": "a JSON file", "argument": "stdlib, human-readable", "confidence": 0.8}
     state, backend, events = run(tmp_path, simple(**{
-        **both("coordinator", [step("post", requests=["x"]), step("post", requests=["build"]),
-                               step("finish", done=True)]),
+        **both("coordinator", [step("post", requests=["decide_storage"]),
+                               step("post", requests=["build<decide_storage"]), step("finish", done=True)]),
         "volunteer:developer": [NONE, claim("build", "write it")],
-        "volunteer:critic": [NONE, NONE]}))
-    assert state["status"] == "completed" and state["requests"][0]["status"] == "unclaimed"
-    assert any("Nobody on the team took request x" in e["text"] for e in state["board"])
+        "volunteer:critic": [NONE, NONE],
+        **both("deliberate", [json_file]), **both("deliberate-vote", [vote(0)])}))
+    decided = state["requests"][0]
+    assert decided["status"] == "done" and decided["by"] == "council"
+    assert decided["result"] == "Council decision: a JSON file"
+    assert state["status"] == "completed" and state["requests"][1]["status"] == "done"
+
+
+def test_reposting_a_request_keeps_its_id_and_skips_done_work(tmp_path):
+    state, backend, events = run(tmp_path, simple(**{
+        **both("coordinator", [step("post", requests=["build"]),
+                               step("post", requests=["build", "docs<build"]), step("finish", done=True)]),
+        "volunteer:developer": [claim("build", "write it"), NONE],
+        "volunteer:critic": [NONE, claim("docs", "write README")],
+        "r1:docs": [final("readme")]}))
+    assert [r["id"] for r in state["requests"]] == ["build", "docs"]
+    assert backend.calls.count("r1:build") == 1
+    assert any(e["event"] == "request_already_done" and e["request"] == "build" for e in events)
+
+
+def test_deliberate_without_question_uses_the_reasoning():
+    from waypost.swarm.models import CoordinatorStep
+    s = CoordinatorStep.model_validate(step("deliberate", reasoning="JSON or SQLite?"))
+    assert s.question == "JSON or SQLite?"
 
 
 def test_fork_in_the_work_is_debated(tmp_path):
@@ -216,3 +240,59 @@ def test_runs_saved_before_v2_resume_on_the_fixed_phases(tmp_path):
         "review-verdict": [PASS]})
     state = SwarmEngine(tmp_path, backend_factory=backend.factory).run(resume=True)
     assert state["config"]["engine"] == "pipeline" and "supervisor" in backend.calls
+
+
+def test_python_is_on_by_default_and_can_be_switched_off(tmp_path, monkeypatch):
+    from waypost.swarm import cli
+    seen = []
+    monkeypatch.setattr(cli.SwarmEngine, "run", lambda self, task=None, **kw: seen.append(self.config)
+                        or {"status": "completed"})
+    cli.main(["run", "--task", "t", "--run-dir", str(tmp_path / "a")])
+    cli.main(["run", "--task", "t", "--run-dir", str(tmp_path / "b"), "--no-python"])
+    assert seen[0].allow_python is True and seen[1].allow_python is False
+
+
+# ------------------------------------------------------- sandboxed python
+
+import os as _os
+import sys as _sys
+from pathlib import Path as _Path
+
+import pytest as _pytest
+
+_has_sandbox = _sys.platform == "darwin" and _os.access("/usr/bin/sandbox-exec", _os.X_OK)
+
+
+def _run_py(tmp_path, code):
+    from waypost.swarm.tools import WorkspaceTools
+    tools = WorkspaceTools(tmp_path / "ws", "artifacts/r1/a", allow_python=True)
+    return json.loads(tools.execute("run_python", {"code": code}, timeout=20))
+
+
+@_pytest.mark.skipif(not _has_sandbox, reason="needs macOS sandbox-exec")
+def test_sandboxed_python_works_in_its_own_directory(tmp_path):
+    out = _run_py(tmp_path, "open('x.txt','w').write('1'); print(6*7)")
+    assert out["exit_code"] == 0 and out["output"].strip() == "42"
+    assert (tmp_path / "ws/artifacts/r1/a/x.txt").read_text() == "1"
+
+
+@_pytest.mark.skipif(not _has_sandbox, reason="needs macOS sandbox-exec")
+def test_sandboxed_python_cannot_write_outside_read_home_or_use_network(tmp_path):
+    outside = tmp_path / "outside.txt"
+    out = _run_py(tmp_path, f"open({str(outside)!r},'w').write('x')")
+    assert out["exit_code"] != 0 and not outside.exists()
+    out = _run_py(tmp_path, f"import os; print(os.listdir({str(_Path.home())!r}))")
+    assert out["exit_code"] != 0 and "Operation not permitted" in out["output"]
+    out = _run_py(tmp_path, "import socket; socket.create_connection(('1.1.1.1', 443), timeout=3)")
+    assert out["exit_code"] != 0
+    # what the code starts is confined too
+    out = _run_py(tmp_path, f"import subprocess; subprocess.run(['/bin/ls', {str(_Path.home())!r}], check=True)")
+    assert out["exit_code"] != 0
+
+
+def test_no_sandbox_means_no_execution(tmp_path, monkeypatch):
+    from waypost.swarm.tools import WorkspaceTools
+    monkeypatch.setattr(WorkspaceTools, "SANDBOX_EXEC", "/nonexistent/sandbox-exec")
+    tools = WorkspaceTools(tmp_path, "artifacts/r1/a", allow_python=True)
+    with _pytest.raises(ValueError, match="no OS sandbox"):
+        tools.execute("run_python", {"code": "print(1)"})

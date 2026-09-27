@@ -40,7 +40,8 @@ def main(argv=None):
     run.add_argument("--max-seconds", type=float, default=None, help="Optional safety cap; unlimited by default")
     run.add_argument("--max-tokens", type=int, default=4096)
     run.add_argument("--request-timeout", type=float, default=1500)
-    run.add_argument("--allow-python", action="store_true", help="Allow arbitrary Python as your OS user; this is NOT sandboxed")
+    run.add_argument("--no-python", dest="allow_python", action="store_false",
+                     help="Forbid running Python (on by default; it is NOT sandboxed, it runs as your OS user)")
     resume = commands.add_parser("resume", help="Continue a failed/interrupted run")
     resume.add_argument("run_dir", type=Path)
     resume.add_argument("--acknowledge-interrupted-tools", action="store_true")
