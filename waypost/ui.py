@@ -457,6 +457,17 @@ function eventView(e){
   if(kind==='llm_response')return addLog(e.time,'Ответ · '+agentOf(e),(e.router?.provider||'')+' / '+(e.router?.model||'')+secs(e)+ladder(e));
   if(kind==='llm_error')return addLog(e.time,'Ошибка · '+agentOf(e),(e.status?e.status+' · ':'')+(e.error||'')+secs(e)+ladder(e));
   if(kind==='invalid_output')return addLog(e.time,'Исправление ответа',e.error||'Неверный формат');
+  if(kind==='task_posted')return addLog(e.time,'Доска · нужна '+e.task,(e.goal||'')+(e.depends_on?.length?' · после: '+e.depends_on.join(', '):''));
+  if(kind==='task_claimed')return addLog(e.time,'Взял · '+e.task,(e.work_kind||'')+(e.attempt>1?' · попытка '+e.attempt:''));
+  if(kind==='mark_done')return addLog(e.time,'Сделано · '+e.task,(e.verified?'✓ проверено запуском':'')+(e.files?.length?' · '+e.files.join(', '):''));
+  if(kind==='task_split')return addLog(e.time,'Разложил · '+e.task,'подзадачи: '+(e.children||[]).join(', '));
+  if(kind==='task_dead_end')return addLog(e.time,'Тупик · '+e.task,e.reason||'');
+  if(kind==='task_reused')return addLog(e.time,'Уже сделано · '+e.task,'взят результат '+e.twin);
+  if(kind==='task_unverified')return addLog(e.time,'Не проверено · '+e.task,'код не запускали — назад на доску');
+  if(kind==='task_retry')return addLog(e.time,'Повтор · '+e.task,e.why||'');
+  if(kind==='task_ready_to_integrate')return addLog(e.time,'Собрать · '+e.task,'все подзадачи готовы');
+  if(kind==='quorum')return addBubble('Кворум · '+e.task,'Спор: '+(e.between||[]).join(' vs ')+'\nГолоса: '+(e.votes||[]).join(', ')+'\nПрав: '+e.winner,'monitor');
+  if(kind==='swarm_done')return addLog(e.time,'Рой',e.goal_status==='dead_end'?'цель невозможна в этой среде':'цель сделана'+(e.verified?' и проверена запуском':''));
   if(kind==='coordinator_plan')return addBubble('Совет · план (раунд '+e.round+')','Команда: '+(e.team||[]).join(', ')+(e.council?' · решают '+e.council+' модели':'')+'\n'+(e.plan||[]).map((x,i)=>(i+1)+'. '+x).join('\n')+(e.facts?.length?'\nФакты: '+e.facts.join('; '):''),'monitor');
   if(kind==='coordinator_step'){const ACT={post:'вывесить запросы',deliberate:'спор',review:'проверка',finish:'сдать',replan:'новый план'};
     return addBubble('Совет · '+(ACT[e.action]||e.action)+(e.width>1?' · '+e.width+' голоса':''),(e.progress?'✓ есть продвижение':'✗ нет продвижения')+(e.looping?' · петля':'')+(e.done?' · готово':'')+'\n'+(e.reasoning||'')+(e.question?'\nВопрос: '+e.question:'')+(e.requests?.length?'\nЗапросы: '+e.requests.join(', '):''),'monitor')}
@@ -488,7 +499,7 @@ function eventView(e){
 }
 async function api(path,options={}){const response=await fetch(path,options);let data=await response.json();if(!response.ok)throw new Error(data.detail||'Ошибка запроса');return data}
 function setStatus(s){currentStatus=s.status;const labels={starting:'Запуск',running:'Работает',paused:'Пауза',interrupted:'Прерван',completed:'Завершён',failed:'Ошибка',needs_attention:'Нужно уточнение',budget_exhausted:'Лимит достигнут'};
-  const c=s.collective;const coll=c?' · коллектив '+c.size+'/'+c.width:'';
+  const c=s.collective;const coll=(s.tasks_total?' · задач '+s.tasks_done+'/'+s.tasks_total:'')+(c?' · коллектив '+c.size+'/'+c.width:'');
   const collTitle=c?('Последний коллектив: '+c.role+' — '+(c.families||[]).filter(Boolean).join(', ')+(c.reason?'\nСузился: '+c.reason:'')):'';
   $('run-status').innerHTML='<span class="status-dot '+escapeHtml(s.status)+'"></span><span title="'+escapeHtml(collTitle)+'">'+escapeHtml(labels[s.status]||s.status)+' · '+escapeHtml(s.phase||'')+' · вызовов '+escapeHtml(s.calls||0)+escapeHtml(coll)+'</span>';
   renderBoard(s.board);

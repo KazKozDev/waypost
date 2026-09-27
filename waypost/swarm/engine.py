@@ -15,6 +15,7 @@ import httpx
 from pydantic import ValidationError
 
 from .coordinator import CoordinatorMixin
+from .stigmergy import StigmergyMixin
 from .llm import Budget, BudgetExceeded, RunInterrupted, SwarmsBackend, parse_json
 from .models import (Action, DraftChoice, Plan, PlanChoice, ProgressDecision, Rebuttal, Review,
                      ReviewConsensus, SwarmConfig)
@@ -48,7 +49,8 @@ MEMORY_LESSONS_SHOWN = 5
 # asked last for that role (last, not never — it may still be the only one).
 MEMORY_POOR_FAILS = 2
 MEMORY_ROLES = ("supervisor", "review-verdict", "review-consensus", "judge-plan", "judge-draft",
-                "synthesis", "audit")
+                "synthesis", "audit", "swarm-build", "swarm-check", "swarm-research", "swarm-write",
+                "swarm-decide")
 
 # The shared board: what every agent sees of what the others learned.
 BOARD_KINDS = ("fact", "decision", "assumption", "dead_end")
@@ -95,7 +97,7 @@ def _normalize_task_ids(value):
     return value
 
 
-class SwarmEngine(CoordinatorMixin):
+class SwarmEngine(StigmergyMixin, CoordinatorMixin):
     # Pause between retries of a failed model call: attempt n waits n * this.
     RETRY_BACKOFF_S = 3.0
     # The router itself unreachable (restarting, down): wait for it rather
@@ -198,7 +200,10 @@ class SwarmEngine(CoordinatorMixin):
                         else:
                             self._post("dead_end", f"Round {self.state['round']} approach abandoned: {exc}",
                                        "progress-monitor")
-                            if self.config.engine == "coordinator":
+                            if self.config.engine == "swarm":
+                                # No plan to redo: the board carries on.
+                                self.store.event("swarm_note", reason=str(exc)[:300])
+                            elif self.config.engine == "coordinator":
                                 # The coordinator rewrites its own ledger next step.
                                 self.state["pending_replan"] = str(exc)
                             else:
@@ -243,6 +248,10 @@ class SwarmEngine(CoordinatorMixin):
         self.budget.checkpoint()
 
     def _advance_phase(self):
+        if self.config.engine == "swarm":
+            self.state["phase"] = "swarm"
+            self._swarm_step()
+            return
         if self.config.engine == "coordinator":
             self.state["phase"] = "coordinate"
             self._coordinate()
@@ -625,6 +634,13 @@ class SwarmEngine(CoordinatorMixin):
             return []
         passed: dict[str, int] = {}
         failed: dict[str, int] = {}
+        if base.startswith("swarm-"):
+            # The swarm keeps a per-family record for each kind of work.
+            for item in self._memory() + [{"kind_stats": self.state.get("kind_stats", {})}]:
+                for family, entry in (item.get("kind_stats") or {}).get(base, {}).items():
+                    passed[family] = passed.get(family, 0) + entry.get("ok", 0)
+                    failed[family] = failed.get(family, 0) + entry.get("fail", 0)
+            return [f for f, n in failed.items() if n >= MEMORY_POOR_FAILS and not passed.get(f)]
         for item in self._memory():
             for family in (item.get("families_used") or {}).get(base, []):
                 bucket = passed if item.get("passed") else failed
@@ -648,7 +664,11 @@ class SwarmEngine(CoordinatorMixin):
                   "dead_ends": [e["text"] for e in self.state.get("board", []) if e["kind"] == "dead_end"][:8],
                   "findings": [] if last.get("passed") else list(last.get("findings", []))[:8],
                   "error": self.state.get("error"),
-                  "families_used": self.state.get("families_used", {})}
+                  "families_used": self.state.get("families_used", {}),
+                  "kind_stats": self.state.get("kind_stats", {})}
+        if self.config.engine == "swarm":
+            goal = self.state.get("tasks", {}).get("goal", {})
+            lesson["passed"] = goal.get("status") == "done" and status == "completed"
         try:
             with self._memory_path().open("a") as handle:
                 handle.write(json.dumps(lesson, ensure_ascii=False) + "\n")
@@ -937,8 +957,14 @@ class SwarmEngine(CoordinatorMixin):
             with self.budget.lock:
                 record["steps"] += 1
                 record["history"].append({"action": action.model_dump()})
-                if action.kind == "final":
-                    record.update(status="done", answer=action.answer, family=family)
+                if action.kind in ("final", "split", "dead_end", "conflict"):
+                    # Terminal for this turn. The stigmergic swarm reads the
+                    # outcome; the other engines only ever ask for final.
+                    answer = action.answer or json.dumps(
+                        {"subtasks": [t.model_dump() for t in action.subtasks], "between": action.between},
+                        ensure_ascii=False)
+                    action = action.model_copy(update={"answer": answer})
+                    record.update(status="done", answer=answer, family=family, outcome=action.model_dump())
                     self.budget.checkpoint()
                     self.store.event("task_done", task=key, role=role)
                     return action.answer

@@ -101,6 +101,9 @@ class SwarmService:
                 "monitor": state.get("monitor", [])[-5:],
                 "board": state.get("board", [])[-60:],
                 "collective": state.get("collective_last"),
+                "tasks_total": len(state.get("tasks", {})),
+                "tasks_done": sum(1 for t in state.get("tasks", {}).values()
+                                  if t.get("status") in ("done", "dead_end")),
                 "artifacts": [str(p.relative_to(directory / "workspace")) for p in
                               sorted((directory / "workspace" / "artifacts").rglob("*")) if p.is_file()]}
 

@@ -38,8 +38,10 @@ class SwarmConfig(StrictModel):
     memory: bool = True
     # coordinator: a coordinator decides every step (v2); pipeline: the
     # fixed phases of v1, kept for resuming old runs and for comparison.
-    engine: Literal["coordinator", "pipeline"] = Field(
-        default_factory=lambda: os.getenv("WAYPOST_SWARM_ENGINE", "coordinator"))
+    # swarm: stigmergy (v3) — agents coordinate through marks on the board;
+    # coordinator: a council decides each step (v2); pipeline: fixed phases (v1).
+    engine: Literal["swarm", "coordinator", "pipeline"] = Field(
+        default_factory=lambda: os.getenv("WAYPOST_SWARM_ENGINE", "swarm"))
 
 
 class Task(StrictModel):
@@ -72,18 +74,34 @@ class Plan(StrictModel):
         return self
 
 
+class SubtaskSpec(StrictModel):
+    id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,48}$")
+    goal: str = Field(min_length=1, max_length=4000)
+    kind: Literal["build", "check", "research", "write", "decide"] = "build"
+    depends_on: list[str] = Field(default_factory=list)
+
+
 class Action(StrictModel):
-    kind: Literal["tool", "final"]
+    """One agent step. tool/final everywhere; the stigmergic swarm also lets
+    an agent split its task, mark it a dead end, or flag a conflict between
+    two results it is integrating."""
+    kind: Literal["tool", "final", "split", "dead_end", "conflict"]
     tool: str | None = None
     arguments: dict = Field(default_factory=dict)
     answer: str | None = None
+    subtasks: list[SubtaskSpec] = Field(default_factory=list)
+    between: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def valid_action(self):
         if self.kind == "tool" and not self.tool:
             raise ValueError("tool action requires a tool name")
-        if self.kind == "final" and not (self.answer and self.answer.strip()):
-            raise ValueError("final action requires a nonempty answer")
+        if self.kind in ("final", "dead_end") and not (self.answer and self.answer.strip()):
+            raise ValueError(f"{self.kind} action requires a nonempty answer")
+        if self.kind == "split" and not (2 <= len(self.subtasks) <= 6):
+            raise ValueError("split requires 2 to 6 subtasks")
+        if self.kind == "conflict" and len(self.between) != 2:
+            raise ValueError("conflict names exactly two task ids in between")
         return self
 
 
@@ -229,6 +247,12 @@ class Position(StrictModel):
 
 class DebateRuling(StrictModel):
     chosen: int = Field(ge=0)
+    why: str = Field(min_length=1)
+
+
+class QuorumVote(StrictModel):
+    """An independent check of two conflicting results: which is right."""
+    winner: str
     why: str = Field(min_length=1)
 
 
