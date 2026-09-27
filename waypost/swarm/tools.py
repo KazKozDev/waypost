@@ -122,7 +122,11 @@ class WorkspaceTools:
         lines = ["(version 1)", "(allow default)", network,
                  "(deny file-write*)",
                  f"(allow file-write* (subpath {q(self.output)}) (literal \"/dev/null\") (literal \"/dev/tty\"))",
-                 f"(deny file-read* (subpath {q(home)}))"]
+                 f"(deny file-read* (subpath {q(home)}))",
+                 # Seeing that a path exists (stat/realpath) is not reading it:
+                 # a Python in a venv under the home walks its own path on
+                 # startup and died of this. Contents and listings stay denied.
+                 "(allow file-read-metadata)"]
         lines += [f"(allow file-read* (subpath {q(p)}))" for p in sorted(readable, key=str)]
         return "\n".join(lines)
 

@@ -312,3 +312,21 @@ def test_network_off_denies_all_network(tmp_path):
     from waypost.swarm.tools import WorkspaceTools
     tools = WorkspaceTools(tmp_path, "artifacts/r1/a", allow_python=True, allow_network=False)
     assert "(deny network*)" in tools._sandbox_profile()
+
+
+_VENV_PY = _Path(__file__).resolve().parents[1] / ".venv/bin/python"
+
+
+@_pytest.mark.skipif(not (_has_sandbox and _VENV_PY.exists() and str(_Path.home()) in str(_VENV_PY)),
+                     reason="needs a venv under the home directory")
+def test_sandbox_runs_a_python_that_lives_under_home(tmp_path):
+    """The swarm runs on the project's .venv, inside the home directory; a
+    live run found every call dying at startup ("realpath: Operation not
+    permitted") because the home was unreadable even to stat."""
+    import subprocess
+    script = ("import json,pathlib,sys; from waypost.swarm.tools import WorkspaceTools; "
+              f"t=WorkspaceTools(pathlib.Path({str(tmp_path)!r}), 'artifacts/r1/a', allow_python=True); "
+              "print(json.loads(t.execute('run_python', {'code': 'print(6*7)'}, timeout=20))['output'].strip())")
+    out = subprocess.run([str(_VENV_PY), "-c", script], capture_output=True, text=True, timeout=60,
+                         cwd=_Path(__file__).resolve().parents[1])
+    assert out.stdout.strip().endswith("42"), out.stdout + out.stderr
