@@ -20,6 +20,12 @@ def split(*subtasks):
     return {"kind": "split", "subtasks": specs}
 
 
+def twice(tid, spec):
+    """First attempt's split is refused (do it yourself first); the second
+    attempt may split."""
+    return {f"t:{tid}:1": [spec], f"t:{tid}:2": [spec]}
+
+
 def dead(reason):
     return {"kind": "dead_end", "answer": reason}
 
@@ -95,13 +101,13 @@ def test_code_counts_as_done_only_after_it_ran(tmp_path):
 
 def test_the_agent_splits_and_then_integrates_its_subtasks(tmp_path):
     state, backend, events = run(tmp_path, {
-        "t:goal:1": [split("a", "b<a")],
+        **twice("goal", split("a", "b<a")),
         "t:goal.a:1": [final("A result")], "t:goal.b:1": [final("B result")],
-        "t:goal:2": [final("A+B integrated")]})
+        "t:goal:3": [final("A+B integrated")]})
     assert state["status"] == "completed" and state["draft"] == "A+B integrated"
     done = [e["task"] for e in events if e["event"] == "mark_done"]
     assert done == ["goal.a", "goal.b", "goal"]
-    assert "A result" in backend.prompts["t:goal:2"][0] and "B result" in backend.prompts["t:goal:2"][0]
+    assert "A result" in backend.prompts["t:goal:3"][0] and "B result" in backend.prompts["t:goal:3"][0]
 
 
 def test_the_same_work_is_never_done_twice(tmp_path):
@@ -109,46 +115,47 @@ def test_the_same_work_is_never_done_twice(tmp_path):
         {"id": "x", "goal": "Write the parser", "kind": "build", "depends_on": []},
         {"id": "y", "goal": "write the parser!", "kind": "build", "depends_on": []}]}
     state, backend, events = run(tmp_path, {
-        "t:goal:1": [same], "t:goal.x:1": [final("parser")], "t:goal:2": [final("done")]})
+        **twice("goal", same), "t:goal.x:1": [final("parser")], "t:goal:3": [final("done")]})
     assert state["status"] == "completed"
     assert "t:goal.y:1" not in backend.calls
     assert state["tasks"]["goal.y"]["reused"] == "goal.x"
 
 
 def test_a_dead_end_scares_off_the_same_goal(tmp_path):
+    first = {"kind": "split", "subtasks": [
+        {"id": "a", "goal": "fetch the page", "kind": "research", "depends_on": []},
+        {"id": "b", "goal": "summarize", "kind": "write", "depends_on": ["a"]}]}
+    again = {"kind": "split", "subtasks": [
+        {"id": "c", "goal": "Fetch the page", "kind": "research", "depends_on": []},
+        {"id": "d", "goal": "report", "kind": "write", "depends_on": []}]}
     state, backend, events = run(tmp_path, {
-        "t:goal:1": [split("a")] if False else [{"kind": "split", "subtasks": [
-            {"id": "a", "goal": "fetch the page", "kind": "research", "depends_on": []},
-            {"id": "b", "goal": "summarize", "kind": "write", "depends_on": ["a"]}]}],
+        "t:goal:1": [first], "t:goal:2": [first],
         "t:goal.a:1": [dead("no network")], "t:goal.b:1": [final("summary of nothing")],
-        "t:goal:2": [{"kind": "split", "subtasks": [
-            {"id": "c", "goal": "Fetch the page", "kind": "research", "depends_on": []},
-            {"id": "d", "goal": "report", "kind": "write", "depends_on": []}]}],
-        "t:goal:2.d:1": [final("r")], "t:goal.d:1": [final("report")],
-        "t:goal:3": [final("could not fetch: no network")]})
+        "t:goal:3": [again], "t:goal.d:1": [final("report")],
+        "t:goal:4": [final("could not fetch: no network")]})
     assert state["tasks"]["goal.c"]["status"] == "dead_end"
     assert "t:goal.c:1" not in backend.calls  # the dead end was reused, not retried
-    assert "no network" in backend.prompts["t:goal:2"][0]
+    assert "no network" in backend.prompts["t:goal:3"][0]
 
 
 def test_a_conflict_is_settled_by_a_quorum(tmp_path):
     state, backend, events = run(tmp_path, {
-        "t:goal:1": [split("a", "b")],
+        **twice("goal", split("a", "b")),
         "t:goal.a:1": [final("the answer is 41")], "t:goal.b:1": [final("the answer is 42")],
-        "t:goal:2": [{"kind": "conflict", "between": ["goal.a", "goal.b"], "answer": "41 or 42?"}],
+        "t:goal:3": [{"kind": "conflict", "between": ["goal.a", "goal.b"], "answer": "41 or 42?"}],
         "quorum:goal": [{"winner": "goal.b", "why": "6*7=42"}],
         "quorum:goal#2": [{"winner": "goal.b", "why": "checked"}],
         "quorum:goal#3": [{"winner": "goal.a", "why": "hm"}],
-        "t:goal:3": [final("42")]})
+        "t:goal:4": [final("42")]})
     quorum = next(e for e in events if e["event"] == "quorum")
     assert quorum["winner"] == "goal.b" and state["tasks"]["goal.a"]["status"] == "dead_end"
-    assert state["draft"] == "42" and "goal.b is right" in backend.prompts["t:goal:3"][0]
+    assert state["draft"] == "42" and "goal.b is right" in backend.prompts["t:goal:4"][0]
 
 
 def test_no_quorum_without_a_conflict(tmp_path):
     state, backend, events = run(tmp_path, {
-        "t:goal:1": [split("a", "b")], "t:goal.a:1": [final("A")], "t:goal.b:1": [final("B")],
-        "t:goal:2": [final("A and B")]})
+        **twice("goal", split("a", "b")), "t:goal.a:1": [final("A")], "t:goal.b:1": [final("B")],
+        "t:goal:3": [final("A and B")]})
     assert not any(c.startswith("quorum") for c in backend.calls)
 
 
@@ -168,15 +175,15 @@ def test_splitting_stops_at_the_depth_limit(tmp_path):
             {"id": "b", "goal": f"side part of {tid}", "kind": "build", "depends_on": []}]}
     script, tid = {}, "goal"
     for _ in range(3):
-        script[f"t:{tid}:1"] = [level(tid)]
+        script.update(twice(tid, level(tid)))
         script[f"t:{tid}.b:1"] = [final("side done")]
-        script[f"t:{tid}:2"] = [final(f"{tid} integrated")]
+        script[f"t:{tid}:3"] = [final(f"{tid} integrated")]
         tid = f"{tid}.a"
-    script[f"t:{tid}:1"] = [level(tid)]           # depth 3: refused
-    script[f"t:{tid}:2"] = [final("did it myself")]
+    script.update(twice(tid, level(tid)))            # depth 3: refused both times
+    script[f"t:{tid}:3"] = [final("did it myself")]
     state, backend, events = run(tmp_path, script)
     assert state["status"] == "completed" and state["draft"] == "goal integrated"
-    assert "Do not split further" in backend.prompts[f"t:{tid}:2"][0]
+    assert "Do not split further" in backend.prompts[f"t:{tid}:3"][0]
 
 
 def test_a_task_never_waits_on_its_own_ancestor(tmp_path):
@@ -184,10 +191,19 @@ def test_a_task_never_waits_on_its_own_ancestor(tmp_path):
         {"id": "a", "goal": "Task", "kind": "build", "depends_on": []},
         {"id": "b", "goal": "other", "kind": "build", "depends_on": []}]}
     state, backend, events = run(tmp_path, {
-        "t:goal:1": [same], "t:goal.a:1": [final("a")], "t:goal.b:1": [final("b")],
-        "t:goal:2": [final("done")]})
+        **twice("goal", same), "t:goal.a:1": [final("a")], "t:goal.b:1": [final("b")],
+        "t:goal:3": [final("done")]})
     assert state["status"] == "completed" and state["draft"] == "done"
     assert state["tasks"]["goal.a"]["depends_on"] == []
+
+
+def test_first_attempt_must_do_the_task_itself(tmp_path):
+    state, backend, events = run(tmp_path, {
+        "t:goal:1": [split("a", "b")], "t:goal:2": [final("did it myself")]})
+    assert state["draft"] == "did it myself" and state["calls"] == 2
+    assert any(e["event"] == "split_refused" for e in events)
+    assert "Do the task yourself first" in backend.prompts["t:goal:2"][0]
+    assert not any(c.startswith("t:goal.") for c in backend.calls)
 
 
 def test_agent_history_does_not_resend_whole_files():

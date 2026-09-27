@@ -330,3 +330,23 @@ def test_sandbox_runs_a_python_that_lives_under_home(tmp_path):
     out = subprocess.run([str(_VENV_PY), "-c", script], capture_output=True, text=True, timeout=60,
                          cwd=_Path(__file__).resolve().parents[1])
     assert out.stdout.strip().endswith("42"), out.stdout + out.stderr
+
+
+@_pytest.mark.skipif(not _has_sandbox, reason="needs macOS sandbox-exec")
+def test_code_mess_stays_out_of_the_deliverables(tmp_path):
+    from waypost.swarm.tools import WorkspaceTools
+    ws = tmp_path / "ws"
+    a = WorkspaceTools(ws, "artifacts/r1/a", allow_python=True)
+    out = json.loads(a.execute("run_python", {"code": (
+        "import os, tempfile; open(os.path.expanduser('~/cache.txt'),'w').write('c'); "
+        "open(os.path.join(tempfile.gettempdir(),'t.txt'),'w').write('t'); "
+        "print(os.environ['PIP_TARGET'], os.environ['PIP_CACHE_DIR'])")}, timeout=20))
+    assert out["exit_code"] == 0, out
+    assert list((ws / "artifacts/r1/a").iterdir()) == []  # nothing but deliverables
+    assert out["output"].split()[0] == str((ws / ".lib").resolve())
+    # a package in the shared library is importable by every agent
+    (ws / ".lib" / "sharedpkg").mkdir(parents=True)
+    (ws / ".lib" / "sharedpkg" / "__init__.py").write_text("VALUE = 7\n")
+    b = WorkspaceTools(ws, "artifacts/r1/b", allow_python=True)
+    out = json.loads(b.execute("run_python", {"code": "import sharedpkg; print(sharedpkg.VALUE)"}, timeout=20))
+    assert out["output"].strip() == "7", out

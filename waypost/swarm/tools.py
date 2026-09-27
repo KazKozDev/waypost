@@ -23,6 +23,10 @@ class WorkspaceTools:
         self.root = root.resolve()
         self.output = self._path(output_prefix)
         self.output.mkdir(parents=True, exist_ok=True)
+        # Where code keeps its mess, outside the deliverables: HOME, temp and
+        # caches per agent; installed packages once for the whole swarm.
+        self.scratch = self.root / ".scratch" / self.output.relative_to(self.root)
+        self.lib = self.root / ".lib"
         self.allow_python = allow_python
         self.allow_network = allow_network
 
@@ -41,8 +45,9 @@ class WorkspaceTools:
         if self.allow_python:
             tools["run_python"] = {"code": "Python source; cwd is your output directory. Sandboxed: writes "
                                            "only in your output directory; " + (
-                                               "internet allowed (not localhost); install packages with "
-                                               "pip install --target ." if self.allow_network
+                                               "internet allowed (not localhost); `pip install <pkg>` goes "
+                                               "to the swarm's shared library and is importable at once by "
+                                               "every agent" if self.allow_network
                                                else "no network")}
         if read_only:
             tools.pop("write_file")
@@ -121,7 +126,8 @@ class WorkspaceTools:
                    else "(deny network*)")
         lines = ["(version 1)", "(allow default)", network,
                  "(deny file-write*)",
-                 f"(allow file-write* (subpath {q(self.output)}) (literal \"/dev/null\") (literal \"/dev/tty\"))",
+                 f"(allow file-write* (subpath {q(self.output)}) (subpath {q(self.scratch)}) "
+                 f"(subpath {q(self.lib)}) (literal \"/dev/null\") (literal \"/dev/tty\"))",
                  f"(deny file-read* (subpath {q(home)}))",
                  # Seeing that a path exists (stat/realpath) is not reading it:
                  # a Python in a venv under the home walks its own path on
@@ -138,7 +144,15 @@ class WorkspaceTools:
             raise ValueError("Python execution is unavailable: no OS sandbox on this machine")
         # No provider keys inherited, and HOME/TMPDIR point into the output dir.
         env = {k: os.environ[k] for k in ("PATH", "LANG") if k in os.environ}
-        env.update(HOME=str(self.output), TMPDIR=str(self.output))
+        self.scratch.mkdir(parents=True, exist_ok=True)
+        self.lib.mkdir(parents=True, exist_ok=True)
+        # pip reads PIP_* from the environment even under -I: installs land in
+        # the shared swarm library, caches in scratch — never in the result.
+        env.update(HOME=str(self.scratch), TMPDIR=str(self.scratch), PIP_TARGET=str(self.lib),
+                   PIP_CACHE_DIR=str(self.scratch / "pip-cache"), PIP_DISABLE_PIP_VERSION_CHECK="1",
+                   SWARM_LIB=str(self.lib))
+        # -I ignores PYTHONPATH, so the shared library is put on sys.path here.
+        code = f"import sys as _s; _s.path.insert(0, {str(self.lib)!r}); del _s\n" + code
         command = [self.SANDBOX_EXEC, "-p", self._sandbox_profile(), sys.executable, "-I", "-c", code]
         with tempfile.TemporaryFile() as output:
             proc = subprocess.Popen(command, cwd=self.output,

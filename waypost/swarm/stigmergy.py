@@ -31,8 +31,9 @@ AGENT_RULES = (
     "dead — never redo done work, reuse its results and files. For YOUR task choose exactly one:\n"
     "- kind=final: you did it; answer = the result itself (for code: run it and its tests with "
     "run_python first and include the real output).\n"
-    "- kind=split: the task is clearly too big for one agent: 2-6 subtasks (id, goal, kind of "
-    "build/check/research/write/decide, depends_on). Never split what you can do yourself.\n"
+    "- kind=split: ONLY after a previous attempt showed the task is too big for one agent (see your "
+    "notes): 2-6 subtasks (id, goal, kind of build/check/research/write/decide, depends_on). Your first "
+    "attempt must do the task itself — one agent writes a whole small program in one go.\n"
     "- kind=dead_end: impossible in this environment (no network, no access, missing tool); answer = "
     "the exact reason. Do not retry impossible things — the reason is a valid result.\n"
     "- kind=conflict: you are integrating subtask results and two of them contradict; between = "
@@ -263,6 +264,15 @@ class StigmergyMixin:
 
     def _on_split(self, task, outcome, key, record):
         subtasks = outcome.get("subtasks") or []
+        if task["attempts"] < 2:
+            # An ant recruits only after it failed to carry the load alone.
+            # First attempt: do it yourself; what you made stays on disk.
+            task["notes"].append("You split on your first attempt. Do the task yourself first; you may split "
+                                 "only if an attempt shows it is really too big for one agent. Files you "
+                                 "already wrote: " + ", ".join(self._artifacts_for(key)[:10]))
+            task["status"] = "needed"
+            self.store.event("split_refused", task=task["id"], reason="first attempt")
+            return
         if task["depth"] >= MAX_DEPTH:
             task["notes"].append(f"Do not split further (depth {MAX_DEPTH} reached): do the task yourself.")
             task["status"] = "needed"
